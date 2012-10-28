@@ -68,7 +68,10 @@
 #define VOLUME_MIN -144
 #define VOLUME_MAX 0
 
-#define RAOP_PORT 5000
+#define DEFAULT_RAOP_PORT 5000
+
+#define DEFAULT_CONTROL_PORT 6001
+#define DEFAULT_TIMING_PORT 6002
 
 struct pa_raop_client {
     pa_core *core;
@@ -80,6 +83,9 @@ struct pa_raop_client {
     uint8_t jack_type;
     uint8_t jack_status;
 
+    uint16_t control_port;
+    uint16_t timing_port;
+
     /* Encryption Related bits */
     AES_KEY aes;
     uint8_t aes_iv[AES_CHUNKSIZE]; /* Initialization vector for aes-cbc */
@@ -87,7 +93,9 @@ struct pa_raop_client {
     uint8_t aes_key[AES_CHUNKSIZE]; /* Key for aes-cbc */
 
     pa_socket_client *sc;
-    int fd;
+    int stream_fd;
+    int control_fd;
+    int timing_fd;
 
     uint16_t seq;
     uint32_t rtptime;
@@ -208,7 +216,7 @@ static void on_connection(pa_socket_client *sc, pa_iochannel *io, void *userdata
     pa_assert(sc);
     pa_assert(c);
     pa_assert(c->sc == sc);
-    pa_assert(c->fd < 0);
+    pa_assert(c->stream_fd < 0);
     pa_assert(c->callback);
 
     pa_socket_client_unref(c->sc);
@@ -219,15 +227,15 @@ static void on_connection(pa_socket_client *sc, pa_iochannel *io, void *userdata
         return;
     }
 
-    c->fd = pa_iochannel_get_send_fd(io);
+    c->stream_fd = pa_iochannel_get_send_fd(io);
 
     pa_iochannel_set_noclose(io, TRUE);
     pa_iochannel_free(io);
 
-    pa_make_tcp_socket_low_delay(c->fd);
+    pa_make_tcp_socket_low_delay(c->stream_fd);
 
     pa_log_debug("Connection established");
-    c->callback(c->fd, c->userdata);
+    c->callback(c->stream_fd, c->userdata);
 }
 
 static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *headers, void *userdata) {
@@ -350,9 +358,9 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
             pa_log_debug("RTSP control channel closed");
             pa_rtsp_client_free(c->rtsp);
             c->rtsp = NULL;
-            if (c->fd > 0) {
+            if (c->stream_fd > 0) {
                 /* We do not close the fd, we leave it to the closed callback to do that. */
-                c->fd = -1;
+                c->stream_fd = -1;
             }
             if (c->sc) {
                 pa_socket_client_unref(c->sc);
@@ -366,23 +374,31 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
 }
 
 pa_raop_client* pa_raop_client_new(pa_core *core, const char *host) {
-    pa_parsed_address a;
     pa_raop_client *c = pa_xnew0(pa_raop_client, 1);
+    pa_parsed_address a;
 
     pa_assert(core);
     pa_assert(host);
 
-    if (pa_parse_address(host, &a) < 0 || a.type == PA_PARSED_ADDRESS_UNIX)
+    if (pa_parse_address(host, &a) < 0)
+        return NULL;
+
+    if (a.type ==  PA_PARSED_ADDRESS_UNIX)
         return NULL;
 
     c->core = core;
-    c->fd = -1;
+    c->stream_fd = -1;
+    c->control_fd = -1;
+    c->timing_fd = -1;
+
+    c->control_port = DEFAULT_CONTROL_PORT;
+    c->timing_port = DEFAULT_TIMING_PORT;
 
     c->host = pa_xstrdup(a.path_or_host);
     if (a.port)
         c->port = a.port;
     else
-        c->port = RAOP_PORT;
+        c->port = DEFAULT_RAOP_PORT;
 
     if (pa_raop_connect(c)) {
         pa_raop_client_free(c);
@@ -486,7 +502,7 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
     int header_size = sizeof(header);
 
     pa_assert(c);
-    pa_assert(c->fd > 0);
+    pa_assert(c->stream_fd > 0);
     pa_assert(raw);
     pa_assert(raw->memblock);
     pa_assert(raw->length > 0);
