@@ -426,11 +426,11 @@ int pa_raop_client_connect(pa_raop_client *c) {
     pa_assert(c);
 
     if (c->rtsp) {
-        pa_log_debug("Connection already in progress");
+        pa_log_debug("Connection already in progress...");
         return 0;
     }
 
-    c->rtsp = pa_rtsp_client_new(c->core->mainloop, c->host, c->port, "iTunes/4.6 (Macintosh; U; PPC Mac OS X 10.3)");
+    c->rtsp = pa_rtsp_client_new(c->core->mainloop, c->host, c->port, "iTunes/7.6.2 (Windows; N;)");
 
     /* Initialise the AES encryption system. */
     pa_random(c->aes_iv, sizeof(c->aes_iv));
@@ -443,7 +443,9 @@ int pa_raop_client_connect(pa_raop_client *c) {
     c->sid = pa_sprintf_malloc("%u", rand_data.a);
     sci = pa_sprintf_malloc("%08x%08x",rand_data.b, rand_data.c);
     pa_rtsp_add_header(c->rtsp, "Client-Instance", sci);
+
     pa_xfree(sci);
+
     pa_rtsp_set_callback(c->rtsp, rtsp_cb, c);
 
     return pa_rtsp_connect(c->rtsp);
