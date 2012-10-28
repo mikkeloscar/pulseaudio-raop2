@@ -22,7 +22,10 @@
   USA.
 ***/
 
+#include <pulse/volume.h>
+
 #include <pulsecore/core.h>
+#include <pulsecore/memchunk.h>
 
 typedef struct pa_raop_client pa_raop_client;
 
