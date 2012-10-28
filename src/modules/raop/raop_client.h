@@ -37,6 +37,7 @@ int pa_raop_flush(pa_raop_client *c);
 
 int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume);
 int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded);
+int pa_raop_client_can_stream(pa_raop_client *c);
 
 typedef void (*pa_raop_client_cb_t)(int fd, void *userdata);
 void pa_raop_client_set_callback(pa_raop_client *c, pa_raop_client_cb_t callback, void *userdata);

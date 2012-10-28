@@ -560,6 +560,15 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
     return 0;
 }
 
+int pa_raop_client_can_stream(pa_raop_client *c) {
+    pa_assert(c);
+
+    if (c->stream_fd != -1)
+        return 1664;
+    else
+        return 0;
+}
+
 void pa_raop_client_set_callback(pa_raop_client *c, pa_raop_client_cb_t callback, void *userdata) {
     pa_assert(c);
 
