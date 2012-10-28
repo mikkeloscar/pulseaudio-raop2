@@ -400,11 +400,6 @@ pa_raop_client* pa_raop_client_new(pa_core *core, const char *host) {
     else
         c->port = DEFAULT_RAOP_PORT;
 
-    if (pa_raop_connect(c)) {
-        pa_raop_client_free(c);
-        return NULL;
-    }
-
     return c;
 }
 
