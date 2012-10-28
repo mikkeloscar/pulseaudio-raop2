@@ -415,7 +415,7 @@ void pa_raop_client_free(pa_raop_client *c) {
     pa_xfree(c);
 }
 
-int pa_raop_connect(pa_raop_client *c) {
+int pa_raop_client_connect(pa_raop_client *c) {
     char *sci;
     struct {
         uint32_t a;
@@ -449,12 +449,21 @@ int pa_raop_connect(pa_raop_client *c) {
     return pa_rtsp_connect(c->rtsp);
 }
 
-
-int pa_raop_flush(pa_raop_client *c) {
+int pa_raop_client_flush(pa_raop_client *c) {
     pa_assert(c);
 
     pa_rtsp_flush(c->rtsp, c->seq, c->rtptime);
+
     return 0;
+}
+
+int pa_raop_client_teardown(pa_raop_client *c) {
+    pa_assert(c);
+
+    /* This should be followed by a STATE_DISCONNECTED event
+     * which will take care of cleaning up everything */
+
+    return pa_rtsp_teardown(c->rtsp);
 }
 
 int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume) {
