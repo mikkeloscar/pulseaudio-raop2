@@ -67,22 +67,22 @@ PA_MODULE_LOAD_ONCE(FALSE);
 PA_MODULE_USAGE(
         "sink_name=<name for the sink> "
         "sink_properties=<properties for the sink> "
-        "server=<address>  "
+        "server=<address> "
+        "protocol=<transport protocol> "
+        "encryption=<encryption type> "
+        "codec=<audio codec> "
+        "channels=<number of channels> "
         "format=<sample format> "
-        "rate=<sample rate> "
-        "channels=<number of channels>");
-
-#define DEFAULT_SINK_NAME "raop"
+        "rate=<sample rate> ");
 
 struct userdata {
     pa_core *core;
     pa_module *module;
     pa_sink *sink;
 
+    pa_thread *thread;
     pa_thread_mq thread_mq;
     pa_rtpoll *rtpoll;
-    pa_rtpoll_item *rtpoll_item;
-    pa_thread *thread;
 
     pa_memchunk raw_memchunk;
     pa_memchunk encoded_memchunk;
@@ -95,8 +95,9 @@ struct userdata {
 
     pa_usec_t latency;
 
-    /*esd_format_t format;*/
-    int32_t rate;
+    unsigned int rate;
+
+    pa_rtpoll_item *raop_rtpoll_item;
 
     pa_smoother *smoother;
     int fd;
@@ -115,9 +116,12 @@ static const char* const valid_modargs[] = {
     "sink_name",
     "sink_properties",
     "server",
+    "protocol",
+    "encryption",
+    "codec",
+    "channels",
     "format",
     "rate",
-    "channels",
     NULL
 };
 
@@ -126,40 +130,25 @@ enum {
     SINK_MESSAGE_RIP_SOCKET
 };
 
-/* Forward declarations: */
-static void sink_set_volume_cb(pa_sink *);
+static pa_usec_t sink_get_latency(struct userdata *u) {
+    pa_usec_t r;
+    int64_t delay;
+    pa_usec_t now1, now2;
 
-static void on_connection(int fd, void *userdata) {
-    int so_sndbuf = 0;
-    socklen_t sl = sizeof(int);
-    struct userdata *u = userdata;
     pa_assert(u);
 
-    pa_assert(u->fd < 0);
-    u->fd = fd;
+    now1 = pa_rtclock_now();
+    now2 = pa_smoother_get(u->smoother, now1);
 
-    if (getsockopt(u->fd, SOL_SOCKET, SO_SNDBUF, &so_sndbuf, &sl) < 0)
-        pa_log_warn("getsockopt(SO_SNDBUF) failed: %s", pa_cstrerror(errno));
-    else {
-        pa_log_debug("SO_SNDBUF is %zu.", (size_t) so_sndbuf);
-        pa_sink_set_max_request(u->sink, PA_MAX((size_t) so_sndbuf, u->block_size));
-    }
+    delay = (int64_t) pa_bytes_to_usec(u->offset
+                                       - u->encoding_overhead
+                                       + (u->encoded_memchunk.length / u->encoding_ratio),
+                                       &u->sink->sample_spec)
+                      - (int64_t) now2;
 
-    /* Set the initial volume. */
-    sink_set_volume_cb(u->sink);
+    r = delay >= 0 ? (pa_usec_t) delay : 0;
 
-    pa_log_debug("Connection authenticated, handing fd to IO thread...");
-
-    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_PASS_SOCKET, NULL, 0, NULL, NULL);
-}
-
-static void on_close(void*userdata) {
-    struct userdata *u = userdata;
-    pa_assert(u);
-
-    pa_log_debug("Connection closed, informing IO thread...");
-
-    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RIP_SOCKET, NULL, 0, NULL, NULL);
+    return r;
 }
 
 static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
@@ -180,6 +169,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                     if (u->fd >= 0) {
                         pa_raop_flush(u->raop);
                     }
+
                     break;
 
                 case PA_SINK_IDLE:
@@ -207,22 +197,23 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             break;
 
         case PA_SINK_MESSAGE_GET_LATENCY: {
-            pa_usec_t w, r;
+            pa_usec_t r = 0;
 
-            r = pa_smoother_get(u->smoother, pa_rtclock_now());
-            w = pa_bytes_to_usec((u->offset - u->encoding_overhead + (u->encoded_memchunk.length / u->encoding_ratio)), &u->sink->sample_spec);
+            if (u->fd >= 0)
+                r = sink_get_latency(u);
 
-            *((pa_usec_t*) data) = w > r ? w - r : 0;
+            *((pa_usec_t*) data) = r;
+
             return 0;
         }
 
         case SINK_MESSAGE_PASS_SOCKET: {
             struct pollfd *pollfd;
 
-            pa_assert(!u->rtpoll_item);
+            pa_assert(!u->raop_rtpoll_item);
 
-            u->rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, 1);
-            pollfd = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
+            u->raop_rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, 1);
+            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
             pollfd->fd = u->fd;
             pollfd->events = POLLOUT;
             /*pollfd->events = */pollfd->revents = 0;
@@ -231,6 +222,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                 /* Our stream has been suspended so we just flush it... */
                 pa_raop_flush(u->raop);
             }
+
             return 0;
         }
 
@@ -246,14 +238,15 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
 
                 pa_log_debug("RTSP control connection closed, but we're suspended so let's not worry about it... we'll open it again later");
 
-                if (u->rtpoll_item)
-                    pa_rtpoll_item_free(u->rtpoll_item);
-                u->rtpoll_item = NULL;
+                if (u->raop_rtpoll_item)
+                    pa_rtpoll_item_free(u->raop_rtpoll_item);
+                u->raop_rtpoll_item = NULL;
             } else {
                 /* Question: is this valid here or should we do some sort of:
                  * return pa_sink_process_msg(PA_MSGOBJECT(u->core), PA_CORE_MESSAGE_UNLOAD_MODULE, u->module, 0, NULL); ?? */
                 pa_module_unload_request(u->module, TRUE);
             }
+
             return 0;
         }
     }
@@ -305,6 +298,39 @@ static void sink_set_mute_cb(pa_sink *s) {
     }
 }
 
+static void raop_connection_cb(int fd, void *userdata) {
+    int so_sndbuf = 0;
+    socklen_t sl = sizeof(int);
+    struct userdata *u = userdata;
+    pa_assert(u);
+
+    pa_assert(u->fd < 0);
+    u->fd = fd;
+
+    if (getsockopt(u->fd, SOL_SOCKET, SO_SNDBUF, &so_sndbuf, &sl) < 0)
+        pa_log_warn("getsockopt(SO_SNDBUF) failed: %s", pa_cstrerror(errno));
+    else {
+        pa_log_debug("SO_SNDBUF is %zu.", (size_t) so_sndbuf);
+        pa_sink_set_max_request(u->sink, PA_MAX((size_t) so_sndbuf, u->block_size));
+    }
+
+    /* Set the initial volume. */
+    sink_set_volume_cb(u->sink);
+
+    pa_log_debug("Connection authenticated, handing fd to IO thread...");
+
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_PASS_SOCKET, NULL, 0, NULL, NULL);
+}
+
+static void raop_close_cb(void *userdata) {
+    struct userdata *u = userdata;
+    pa_assert(u);
+
+    pa_log_debug("Connection closed, informing IO thread...");
+
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RIP_SOCKET, NULL, 0, NULL, NULL);
+}
+
 static void thread_func(void *userdata) {
     struct userdata *u = userdata;
     int write_type = 0;
@@ -330,9 +356,9 @@ static void thread_func(void *userdata) {
             if (u->sink->thread_info.rewind_requested)
                 pa_sink_process_rewind(u->sink, 0);
 
-        if (u->rtpoll_item) {
+        if (u->raop_rtpoll_item) {
             struct pollfd *pollfd;
-            pollfd = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
+            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
 
             /* Render some data and write it to the fifo. */
             if (/*PA_SINK_IS_OPENED(u->sink->thread_info.state) && */pollfd->revents) {
@@ -469,10 +495,10 @@ static void thread_func(void *userdata) {
         if (ret == 0)
             goto finish;
 
-        if (u->rtpoll_item) {
+        if (u->raop_rtpoll_item) {
             struct pollfd* pollfd;
 
-            pollfd = pa_rtpoll_item_get_pollfd(u->rtpoll_item, NULL);
+            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
 
             if (pollfd->revents & ~POLLOUT) {
                 if (u->sink->thread_info.state != PA_SINK_SUSPENDED) {
@@ -481,10 +507,10 @@ static void thread_func(void *userdata) {
                 }
 
                 /* We expect this to happen on occasion if we are not sending data.
-                 * It's perfectly natural and normal and natural. */
-                if (u->rtpoll_item)
-                    pa_rtpoll_item_free(u->rtpoll_item);
-                u->rtpoll_item = NULL;
+                 * It's perfectly natural and normal. */
+                if (u->raop_rtpoll_item)
+                    pa_rtpoll_item_free(u->raop_rtpoll_item);
+                u->raop_rtpoll_item = NULL;
             }
         }
     }
@@ -498,7 +524,7 @@ fail:
 finish:
     if (silence.memblock)
         pa_memblock_unref(silence.memblock);
-    pa_log_debug("Thread shutting down");
+    pa_log_debug("Thread shutting down.");
 }
 
 int pa__init(pa_module *m) {
@@ -507,23 +533,29 @@ int pa__init(pa_module *m) {
     pa_modargs *ma = NULL;
     const char *server;
     pa_sink_new_data data;
+    char *t;
 
     pa_assert(m);
 
     if (!(ma = pa_modargs_new(m->argument, valid_modargs))) {
-        pa_log("failed to parse module arguments");
+        pa_log("Failed to parse module arguments.");
         goto fail;
     }
 
     ss = m->core->default_sample_spec;
     if (pa_modargs_get_sample_spec(ma, &ss) < 0) {
-        pa_log("invalid sample format specification");
+        pa_log("Invalid sample format specification.");
         goto fail;
     }
 
     if ((/*ss.format != PA_SAMPLE_U8 &&*/ ss.format != PA_SAMPLE_S16NE) ||
         (ss.channels > 2)) {
-        pa_log("sample type support is limited to mono/stereo and U8 or S16NE sample data");
+        pa_log("Sample type support is limited to mono/stereo and S16NE sample data.");
+        goto fail;
+    }
+
+    if (!(server = pa_modargs_get_value(ma, "server", NULL))) {
+        pa_log("No server argument given.");
         goto fail;
     }
 
@@ -531,7 +563,10 @@ int pa__init(pa_module *m) {
     u->core = m->core;
     u->module = m;
     m->userdata = u;
-    u->fd = -1;
+
+    pa_memchunk_reset(&u->raw_memchunk);
+    pa_memchunk_reset(&u->encoded_memchunk);
+
     u->smoother = pa_smoother_new(
             PA_USEC_PER_SEC,
             PA_USEC_PER_SEC*2,
@@ -540,8 +575,8 @@ int pa__init(pa_module *m) {
             10,
             0,
             FALSE);
-    pa_memchunk_reset(&u->raw_memchunk);
-    pa_memchunk_reset(&u->encoded_memchunk);
+    u->fd = -1;
+
     u->offset = 0;
     u->encoding_overhead = 0;
     u->next_encoding_overhead = 0;
@@ -549,64 +584,63 @@ int pa__init(pa_module *m) {
 
     u->rtpoll = pa_rtpoll_new();
     pa_thread_mq_init(&u->thread_mq, m->core->mainloop, u->rtpoll);
-    u->rtpoll_item = NULL;
+    u->raop_rtpoll_item = NULL;
 
-    /*u->format =
-        (ss.format == PA_SAMPLE_U8 ? ESD_BITS8 : ESD_BITS16) |
-        (ss.channels == 2 ? ESD_STEREO : ESD_MONO);*/
     u->rate = ss.rate;
-    u->block_size = pa_usec_to_bytes(PA_USEC_PER_SEC/20, &ss);
+
+    u->block_size = pa_usec_to_bytes(PA_USEC_PER_SEC / 20, &ss);
 
     u->read_data = u->write_data = NULL;
-    u->read_index = u->write_index = u->read_length = u->write_length = 0;
+    u->write_index = u->write_length = 0;
+    u->read_index = u->read_length = 0;
 
-    /*u->state = STATE_AUTH;*/
     u->latency = 0;
 
-    if (!(server = pa_modargs_get_value(ma, "server", NULL))) {
-        pa_log("No server argument given.");
-        goto fail;
-    }
+    /* This may be overwriten if sink_name is speciffied in module arguments. */
+    t = pa_sprintf_malloc("raop_client.%s", server);
 
     pa_sink_new_data_init(&data);
     data.driver = __FILE__;
     data.module = m;
-    pa_sink_new_data_set_name(&data, pa_modargs_get_value(ma, "sink_name", DEFAULT_SINK_NAME));
+    pa_sink_new_data_set_name(&data, pa_modargs_get_value(ma, "sink_name", t));
     pa_sink_new_data_set_sample_spec(&data, &ss);
     pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, server);
     pa_proplist_sets(data.proplist, PA_PROP_DEVICE_INTENDED_ROLES, "music");
     pa_proplist_setf(data.proplist, PA_PROP_DEVICE_DESCRIPTION, "RAOP sink '%s'", server);
 
+    /* RAOP discover module will eventually overwrite sink_name and others (PA_UPDATE_REPLACE). */
     if (pa_modargs_get_proplist(ma, "sink_properties", data.proplist, PA_UPDATE_REPLACE) < 0) {
-        pa_log("Invalid properties");
+        pa_log("Invalid properties.");
         pa_sink_new_data_done(&data);
+        pa_xfree(t);
         goto fail;
     }
 
-    u->sink = pa_sink_new(m->core, &data, PA_SINK_LATENCY|PA_SINK_NETWORK);
+    pa_xfree(t);
+
+    u->sink = pa_sink_new(m->core, &data, PA_SINK_NETWORK | PA_SINK_LATENCY);
     pa_sink_new_data_done(&data);
 
     if (!u->sink) {
-        pa_log("Failed to create sink.");
+        pa_log("Failed to create sink object.");
         goto fail;
     }
 
     u->sink->parent.process_msg = sink_process_msg;
-    u->sink->userdata = u;
     pa_sink_set_set_volume_callback(u->sink, sink_set_volume_cb);
     pa_sink_set_set_mute_callback(u->sink, sink_set_mute_cb);
-    u->sink->flags = PA_SINK_LATENCY|PA_SINK_NETWORK;
 
     pa_sink_set_asyncmsgq(u->sink, u->thread_mq.inq);
     pa_sink_set_rtpoll(u->sink, u->rtpoll);
+    u->sink->userdata = u;
 
     if (!(u->raop = pa_raop_client_new(u->core, server))) {
         pa_log("Failed to connect to server.");
         goto fail;
     }
 
-    pa_raop_client_set_callback(u->raop, on_connection, u);
-    pa_raop_client_set_closed_callback(u->raop, on_close, u);
+    pa_raop_client_set_callback(u->raop, raop_connection_cb, u);
+    pa_raop_client_set_closed_callback(u->raop, raop_close_cb, u);
 
     if (!(u->thread = pa_thread_new("raop-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
@@ -657,8 +691,8 @@ void pa__done(pa_module *m) {
     if (u->sink)
         pa_sink_unref(u->sink);
 
-    if (u->rtpoll_item)
-        pa_rtpoll_item_free(u->rtpoll_item);
+    if (u->raop_rtpoll_item)
+        pa_rtpoll_item_free(u->raop_rtpoll_item);
 
     if (u->rtpoll)
         pa_rtpoll_free(u->rtpoll);
