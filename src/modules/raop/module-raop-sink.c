@@ -126,8 +126,8 @@ static const char* const valid_modargs[] = {
 };
 
 enum {
-    SINK_MESSAGE_PASS_SOCKET = PA_SINK_MESSAGE_MAX,
-    SINK_MESSAGE_RIP_SOCKET
+    SINK_MESSAGE_CONNECTED = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_DISCONNECTED
 };
 
 static pa_usec_t sink_get_latency(struct userdata *u) {
@@ -155,36 +155,35 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
     struct userdata *u = PA_SINK(o)->userdata;
 
     switch (code) {
-
         case PA_SINK_MESSAGE_SET_STATE:
-
             switch ((pa_sink_state_t) PA_PTR_TO_UINT(data)) {
-
                 case PA_SINK_SUSPENDED:
                     pa_assert(PA_SINK_IS_OPENED(u->sink->thread_info.state));
 
                     pa_smoother_pause(u->smoother, pa_rtclock_now());
 
                     /* Issue a FLUSH if we are connected. */
-                    if (u->fd >= 0) {
+                    if (pa_raop_client_can_stream(u->raop))
+                        pa_raop_client_teardown(u->raop);
+
+                    break;
+
+                case PA_SINK_IDLE:
+                    if (u->sink->thread_info.state == PA_SINK_RUNNING) {
+                        pa_rtpoll_set_timer_disabled(u->rtpoll);
                         pa_raop_client_flush(u->raop);
                     }
 
                     break;
 
-                case PA_SINK_IDLE:
                 case PA_SINK_RUNNING:
-
-                    if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
+                    if (u->sink->thread_info.state == PA_SINK_SUSPENDED)
                         pa_smoother_resume(u->smoother, pa_rtclock_now(), TRUE);
 
-                        /* The connection can be closed when idle, so check to
-                         * see if we need to reestablish it. */
-                        if (u->fd < 0)
-                            pa_raop_client_connect(u->raop);
-                        else
-                            pa_raop_client_flush(u->raop);
-                    }
+                    /* The connection can be closed when idle, so check to
+                     * see if we need to reestablish it. */
+                    if (!pa_raop_client_can_stream(u->raop))
+                        pa_raop_client_connect(u->raop);
 
                     break;
 
@@ -199,7 +198,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
         case PA_SINK_MESSAGE_GET_LATENCY: {
             pa_usec_t r = 0;
 
-            if (u->fd >= 0)
+            if (pa_raop_client_can_stream(u->raop))
                 r = sink_get_latency(u);
 
             *((pa_usec_t*) data) = r;
@@ -207,16 +206,8 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             return 0;
         }
 
-        case SINK_MESSAGE_PASS_SOCKET: {
-            struct pollfd *pollfd;
-
-            pa_assert(!u->raop_rtpoll_item);
-
-            u->raop_rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, 1);
-            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
-            pollfd->fd = u->fd;
-            pollfd->events = POLLOUT;
-            /*pollfd->events = */pollfd->revents = 0;
+        case SINK_MESSAGE_CONNECTED: {
+            pa_rtpoll_set_timer_relative(u->rtpoll, pa_bytes_to_usec(u->block_size, &u->sink->sample_spec));
 
             if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
                 /* Our stream has been suspended so we just flush it... */
@@ -226,23 +217,16 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             return 0;
         }
 
-        case SINK_MESSAGE_RIP_SOCKET: {
-            if (u->fd >= 0) {
-                pa_close(u->fd);
-                u->fd = -1;
-            } else
-                /* FIXME */
-                pa_log("We should not get to this state. Cannot rip socket if not connected.");
-
+        case SINK_MESSAGE_DISCONNECTED: {
             if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
-
                 pa_log_debug("RTSP control connection closed, but we're suspended so let's not worry about it... we'll open it again later");
 
+                pa_rtpoll_set_timer_disabled(u->rtpoll);
                 if (u->raop_rtpoll_item)
                     pa_rtpoll_item_free(u->raop_rtpoll_item);
                 u->raop_rtpoll_item = NULL;
             } else {
-                /* Question: is this valid here or should we do some sort of:
+                /* Question: is this valid here: or should we do some sort of:
                  * return pa_sink_process_msg(PA_MSGOBJECT(u->core), PA_CORE_MESSAGE_UNLOAD_MODULE, u->module, 0, NULL); ?? */
                 pa_module_unload_request(u->module, TRUE);
             }
@@ -319,7 +303,7 @@ static void raop_connection_cb(int fd, void *userdata) {
 
     pa_log_debug("Connection authenticated, handing fd to IO thread...");
 
-    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_PASS_SOCKET, NULL, 0, NULL, NULL);
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_CONNECTED, NULL, 0, NULL, NULL);
 }
 
 static void raop_close_cb(void *userdata) {
@@ -328,7 +312,7 @@ static void raop_close_cb(void *userdata) {
 
     pa_log_debug("Connection closed, informing IO thread...");
 
-    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RIP_SOCKET, NULL, 0, NULL, NULL);
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_DISCONNECTED, NULL, 0, NULL, NULL);
 }
 
 static void thread_func(void *userdata) {
@@ -641,6 +625,8 @@ int pa__init(pa_module *m) {
 
     pa_raop_client_set_callback(u->raop, raop_connection_cb, u);
     pa_raop_client_set_closed_callback(u->raop, raop_close_cb, u);
+
+    pa_raop_client_connect(u->raop);
 
     if (!(u->thread = pa_thread_new("raop-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
