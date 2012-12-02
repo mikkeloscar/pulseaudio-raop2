@@ -45,6 +45,7 @@
 #include <pulsecore/core-error.h>
 #include <pulsecore/core-util.h>
 #include <pulsecore/iochannel.h>
+#include <pulsecore/arpa-inet.h>
 #include <pulsecore/socket-util.h>
 #include <pulsecore/log.h>
 #include <pulsecore/parseaddr.h>
@@ -78,6 +79,7 @@ struct pa_raop_client {
     char *host;
     uint16_t port;
     char *sid;
+
     pa_rtsp_client *rtsp;
 
     uint8_t jack_type;
@@ -199,63 +201,157 @@ static int aes_encrypt(pa_raop_client *c, uint8_t *data, int size) {
         memcpy(c->aes_nv, buf, AES_CHUNKSIZE);
         i += AES_CHUNKSIZE;
     }
+
     return i;
 }
 
 static inline void rtrimchar(char *str, char rc) {
-    char *sp = str + strlen(str) - 1;
+    char *sp;
+
+    sp = str + strlen(str) - 1;
     while (sp >= str && *sp == rc) {
         *sp = '\0';
-        sp -= 1;
+        sp--;
     }
 }
 
-static void on_connection(pa_socket_client *sc, pa_iochannel *io, void *userdata) {
-    pa_raop_client *c = userdata;
+static int bind_socket(pa_raop_client *c, int fd, uint16_t port) {
+    struct sockaddr_in sa4;
+#ifdef HAVE_IPV6
+    struct sockaddr_in6 sa6;
+#endif
+    struct sockaddr *sa;
+    socklen_t salen;
+    int one = 1;
 
-    pa_assert(sc);
-    pa_assert(c);
-    pa_assert(c->sc == sc);
-    pa_assert(c->stream_fd < 0);
-    pa_assert(c->callback);
-
-    pa_socket_client_unref(c->sc);
-    c->sc = NULL;
-
-    if (!io) {
-        pa_log("Connection failed: %s", pa_cstrerror(errno));
-        return;
+    if (inet_pton(AF_INET, pa_rtsp_localip(c->rtsp), &sa4.sin_addr) > 0) {
+        sa4.sin_family = AF_INET;
+        sa4.sin_port = htons((uint16_t) port);
+        sa = (struct sockaddr *) &sa4;
+        salen = sizeof(sa4);
+#ifdef HAVE_IPV6
+    } else if (inet_pton(AF_INET6, pa_rtsp_localip(c->rtsp), &sa6.sin6_addr) > 0) {
+        sa6.sin6_family = AF_INET6;
+        sa6.sin6_port = htons((uint16_t) port);
+        sa = (struct sockaddr*) &sa6;
+        salen = sizeof(sa6);
+#endif
+    } else {
+        pa_log("Invalid destination '%s'", c->host);
+        goto fail;
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one)) < 0) {
+        pa_log("SO_TIMESTAMP failed: %s", pa_cstrerror(errno));
+        goto fail;
     }
 
-    c->stream_fd = pa_iochannel_get_send_fd(io);
+    one = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
+        pa_log("SO_REUSEADDR failed: %s", pa_cstrerror(errno));
+        goto fail;
+    }
 
-    pa_iochannel_set_noclose(io, TRUE);
-    pa_iochannel_free(io);
+    if (bind(fd, sa, salen) < 0) {
+        pa_log("bind() failed: %s", pa_cstrerror(errno));
+        goto fail;
+    }
 
-    pa_make_tcp_socket_low_delay(c->stream_fd);
+    return fd;
 
-    pa_log_debug("Connection established");
-    c->callback(c->stream_fd, c->userdata);
+fail:
+    return -1;
+}
+
+static int open_udp_socket(pa_raop_client *c, uint16_t port, uint16_t bind) {
+    int fd = -1;
+    sa_family_t af;
+    struct sockaddr_in sa4;
+#ifdef HAVE_IPV6
+    struct sockaddr_in6 sa6;
+#endif
+
+    if (inet_pton(AF_INET, c->host, &sa4.sin_addr) > 0) {
+        sa4.sin_family = af = AF_INET;
+        sa4.sin_port = htons((uint16_t) port);
+#ifdef HAVE_IPV6
+    } else if (inet_pton(AF_INET6, c->host, &sa6.sin6_addr) > 0) {
+        sa6.sin6_family = af = AF_INET6;
+        sa6.sin6_port = htons((uint16_t) port);
+#endif
+    } else {
+        pa_log("Invalid destination '%s'", c->host);
+        goto fail;
+    }
+    if ((fd = pa_socket_cloexec(af, SOCK_DGRAM, 0)) < 0) {
+        pa_log("socket() failed: %s", pa_cstrerror(errno));
+        goto fail;
+    }
+
+    if (bind) {
+        if (bind_socket(c, fd, port) < 0) {
+            pa_log("failed to bind UDP socket");
+            goto fail;
+        }
+    }
+
+    if (af == AF_INET && connect(fd, (struct sockaddr *) &sa4, sizeof(sa4)) < 0) {
+        pa_log("connect() failed: %s", pa_cstrerror(errno));
+        goto fail;
+#ifdef HAVE_IPV6
+    } else if (af == AF_INET6 && connect(fd, (struct sockaddr *) &sa6, sizeof(sa6)) < 0) {
+        pa_log("connect() failed: %s", pa_cstrerror(errno));
+        goto fail;
+#endif
+    }
+
+    /* If the socket queue is full, let's drop packets */
+    pa_make_fd_nonblock(fd);
+    pa_make_udp_socket_low_delay(fd);
+
+    return fd;
+
+fail:
+    if (fd >= 0)
+        pa_close(fd);
+
+    return -1;
 }
 
 static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *headers, void *userdata) {
     pa_raop_client *c = userdata;
+
     pa_assert(c);
     pa_assert(rtsp);
     pa_assert(rtsp == c->rtsp);
 
     switch (state) {
         case STATE_CONNECT: {
-            int i;
+            uint16_t rand;
+            char *sac;
+
+            /* Set the Apple-Challenge key */
+            pa_random(&rand, sizeof(rand));
+            pa_base64_encode(&rand, AES_CHUNKSIZE, &sac);
+            rtrimchar(sac, '=');
+            pa_rtsp_add_header(c->rtsp, "Apple-Challenge", sac);
+
+            pa_rtsp_options(c->rtsp);
+
+            pa_xfree(sac);
+            break;
+        }
+
+        case STATE_OPTIONS: {
             uint8_t rsakey[512];
-            char *key, *iv, *sac, *sdp;
-            uint16_t rand_data;
+            char *key, *iv, *sdp;
             const char *ip;
             char *url;
+            int i;
 
-            pa_log_debug("RAOP: CONNECTED");
-            ip = pa_rtsp_localip(c->rtsp);
+            pa_rtsp_remove_header(c->rtsp, "Apple-Challenge");
+
             /* First of all set the url properly. */
+            ip = pa_rtsp_localip(c->rtsp);
             url = pa_sprintf_malloc("rtsp://%s/%s", ip, c->sid);
             pa_rtsp_set_url(c->rtsp, url);
             pa_xfree(url);
@@ -267,10 +363,6 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
             pa_base64_encode(c->aes_iv, AES_CHUNKSIZE, &iv);
             rtrimchar(iv, '=');
 
-            pa_random(&rand_data, sizeof(rand_data));
-            pa_base64_encode(&rand_data, AES_CHUNKSIZE, &sac);
-            rtrimchar(sac, '=');
-            pa_rtsp_add_header(c->rtsp, "Apple-Challenge", sac);
             sdp = pa_sprintf_malloc(
                 "v=0\r\n"
                 "o=iTunes %s 0 IN IP4 %s\r\n"
@@ -279,97 +371,194 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
                 "t=0 0\r\n"
                 "m=audio 0 RTP/AVP 96\r\n"
                 "a=rtpmap:96 AppleLossless\r\n"
-                "a=fmtp:96 4096 0 16 40 10 14 2 255 0 0 44100\r\n"
+                "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
                 "a=rsaaeskey:%s\r\n"
                 "a=aesiv:%s\r\n",
                 c->sid, ip, c->host, key, iv);
+
             pa_rtsp_announce(c->rtsp, sdp);
+
             pa_xfree(key);
             pa_xfree(iv);
-            pa_xfree(sac);
             pa_xfree(sdp);
             break;
         }
 
-        case STATE_ANNOUNCE:
-            pa_log_debug("RAOP: ANNOUNCED");
-            pa_rtsp_remove_header(c->rtsp, "Apple-Challenge");
-            pa_rtsp_setup(c->rtsp);
+        case STATE_ANNOUNCE: {
+            char *transport;
+
+            transport = pa_sprintf_malloc("RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=%d;timing_port=%d",
+                c->control_port,
+                c->timing_port);
+
+            pa_rtsp_setup(c->rtsp, transport);
+
+            pa_xfree(transport);
             break;
+        }
 
         case STATE_SETUP: {
-            char *aj = pa_xstrdup(pa_headerlist_gets(headers, "Audio-Jack-Status"));
-            pa_log_debug("RAOP: SETUP");
-            if (aj) {
-                char *token, *pc;
-                char delimiters[] = ";";
-                const char* token_state = NULL;
+            char *ajs, *transport, *token, *pc;
+            char delimiters[] = ";";
+            const char *token_state = NULL;
+            uint32_t port;
+
+            ajs = pa_xstrdup(pa_headerlist_gets(headers, "Audio-Jack-Status"));
+            transport = pa_xstrdup(pa_headerlist_gets(headers, "Transport"));
+
+            if (ajs) {
                 c->jack_type = JACK_TYPE_ANALOG;
                 c->jack_status = JACK_STATUS_DISCONNECTED;
 
-                while ((token = pa_split(aj, delimiters, &token_state))) {
+                while ((token = pa_split(ajs, delimiters, &token_state))) {
                     if ((pc = strstr(token, "="))) {
                       *pc = 0;
-                      if (pa_streq(token, "type") && pa_streq(pc+1, "digital")) {
+                      if (pa_streq(token, "type") && pa_streq(pc + 1, "digital"))
                           c->jack_type = JACK_TYPE_DIGITAL;
-                      }
                     } else {
                         if (pa_streq(token, "connected"))
                             c->jack_status = JACK_STATUS_CONNECTED;
                     }
                     pa_xfree(token);
                 }
-                pa_xfree(aj);
+
             } else {
-                pa_log_warn("Audio Jack Status missing");
+                pa_log_warn("Audio-Jack-Status missing");
             }
+
+            token_state = NULL;
+
+            if (transport) {
+                /* Now parse out the server port component of the response. */
+                while ((token = pa_split(transport, delimiters, &token_state))) {
+                    if ((pc = strstr(token, "="))) {
+                        *pc = 0;
+                        if (pa_streq(token, "control_port")) {
+                            port = 0;
+                            pa_atou(pc + 1, &port);
+                            c->control_port = port;
+                        }
+                        if (pa_streq(token, "timing_port")) {
+                            port = 0;
+                            pa_atou(pc + 1, &port);
+                            c->timing_port = port;
+                        }
+                        *pc = '=';
+                    }
+                    pa_xfree(token);
+                }
+            } else {
+                pa_log_warn("Transport missing");
+            }
+
+            pa_xfree(ajs);
+            pa_xfree(transport);
+
+            port = pa_rtsp_serverport(c->rtsp);
+
+            if (port == 0)
+                goto error;
+            if (c->control_port == 0 || c->timing_port == 0)
+                goto error;
+
+            pa_log_debug("Using server_port=%d, control_port=%d & timing_port=%d",
+                port,
+                c->control_port,
+                c->timing_port);
+
+            c->stream_fd = open_udp_socket(c, port, 0);
+            c->control_fd = open_udp_socket(c, c->control_port, 1);
+            c->timing_fd = open_udp_socket(c, c->timing_port, 1);
+
+            if (c->stream_fd <= 0)
+                goto error;
+            if (c->control_fd <= 0 || c->timing_fd <= 0)
+                goto error;
+
             pa_rtsp_record(c->rtsp, &c->seq, &c->rtptime);
+
+            break;
+
+error:
+            if (c->stream_fd != -1) {
+                pa_close(c->stream_fd);
+                c->stream_fd = -1;
+            }
+            if (c->control_fd != -1) {
+                pa_close(c->control_fd);
+                c->control_fd = -1;
+            }
+            if (c->timing_fd != -1) {
+                pa_close(c->timing_fd);
+                c->timing_fd = -1;
+            }
+
+            pa_rtsp_client_free(c->rtsp);
+            c->rtsp = NULL;
+
+            c->control_port = DEFAULT_CONTROL_PORT;
+            c->timing_port = DEFAULT_TIMING_PORT;
+
+            pa_log_error("aborting RTSP setup, failed creating required sockets");
+
             break;
         }
 
         case STATE_RECORD: {
-            uint32_t port = pa_rtsp_serverport(c->rtsp);
+            uint32_t port;
+
             pa_log_debug("RAOP: RECORDED");
 
-            if (!(c->sc = pa_socket_client_new_string(c->core->mainloop, TRUE, c->host, port))) {
-                pa_log("failed to connect to server '%s:%d'", c->host, port);
-                return;
-            }
-            pa_socket_client_set_callback(c->sc, on_connection, c);
             break;
         }
 
-        case STATE_FLUSH:
+        case STATE_FLUSH: {
             pa_log_debug("RAOP: FLUSHED");
-            break;
 
-        case STATE_TEARDOWN:
+            break;
+        }
+
+        case STATE_TEARDOWN: {
             pa_log_debug("RAOP: TEARDOWN");
-            break;
 
-        case STATE_SET_PARAMETER:
+            break;
+        }
+
+        case STATE_SET_PARAMETER: {
             pa_log_debug("RAOP: SET_PARAMETER");
-            break;
 
-        case STATE_DISCONNECTED:
+            break;
+        }
+
+        case STATE_DISCONNECTED: {
             pa_assert(c->closed_callback);
             pa_assert(c->rtsp);
 
             pa_log_debug("RTSP control channel closed");
+
             pa_rtsp_client_free(c->rtsp);
             c->rtsp = NULL;
+
             if (c->stream_fd > 0) {
-                /* We do not close the fd, we leave it to the closed callback to do that. */
+                pa_close(c->stream_fd);
                 c->stream_fd = -1;
             }
-            if (c->sc) {
-                pa_socket_client_unref(c->sc);
-                c->sc = NULL;
+            if (c->control_fd > 0) {
+                pa_close(c->control_fd);
+                c->control_fd = -1;
             }
+            if (c->timing_fd > 0) {
+                pa_close(c->timing_fd);
+                c->timing_fd = -1;
+            }
+
             pa_xfree(c->sid);
             c->sid = NULL;
+
             c->closed_callback(c->closed_userdata);
+
             break;
+        }
     }
 }
 
@@ -418,10 +607,11 @@ void pa_raop_client_free(pa_raop_client *c) {
 int pa_raop_client_connect(pa_raop_client *c) {
     char *sci;
     struct {
-        uint32_t a;
-        uint32_t b;
-        uint32_t c;
-    } rand_data;
+        uint32_t sid;
+        uint32_t sc1i;
+        uint32_t sc2i;
+    } rand;
+    int rv;
 
     pa_assert(c);
 
@@ -438,40 +628,45 @@ int pa_raop_client_connect(pa_raop_client *c) {
     memcpy(c->aes_nv, c->aes_iv, sizeof(c->aes_nv));
     AES_set_encrypt_key(c->aes_key, 128, &c->aes);
 
-    /* Generate random instance id. */
-    pa_random(&rand_data, sizeof(rand_data));
-    c->sid = pa_sprintf_malloc("%u", rand_data.a);
-    sci = pa_sprintf_malloc("%08x%08x",rand_data.b, rand_data.c);
+    /* Generate random instance ids. */
+    pa_random(&rand, sizeof(rand));
+    c->sid = pa_sprintf_malloc("%u", rand.sid);
+    sci = pa_sprintf_malloc("%08X%08X",rand.sc1i, rand.sc2i);
     pa_rtsp_add_header(c->rtsp, "Client-Instance", sci);
-
     pa_xfree(sci);
 
     pa_rtsp_set_callback(c->rtsp, rtsp_cb, c);
+    rv = pa_rtsp_connect(c->rtsp);
 
-    return pa_rtsp_connect(c->rtsp);
+    return rv;
 }
 
 int pa_raop_client_flush(pa_raop_client *c) {
+    int rv = 0;
+
     pa_assert(c);
 
     pa_rtsp_flush(c->rtsp, c->seq, c->rtptime);
 
-    return 0;
+    return rv;
 }
 
 int pa_raop_client_teardown(pa_raop_client *c) {
+    int rv;
+
     pa_assert(c);
 
     /* This should be followed by a STATE_DISCONNECTED event
      * which will take care of cleaning up everything */
+    rv = pa_rtsp_teardown(c->rtsp);
 
-    return pa_rtsp_teardown(c->rtsp);
+    return rv;
 }
 
 int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume) {
-    int rv;
     double db;
     char *param;
+    int rv;
 
     pa_assert(c);
 
@@ -506,6 +701,7 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
         0x00, 0x00, 0x00, 0x00,
     };
     int header_size = sizeof(header);
+    int rv = 0;
 
     pa_assert(c);
     pa_assert(c->stream_fd > 0);
@@ -568,16 +764,19 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
     /* We're done with the chunk. */
     pa_memblock_release(encoded->memblock);
 
-    return 0;
+    return rv;
 }
 
 int pa_raop_client_can_stream(pa_raop_client *c) {
+    int rv = 0;
+
     pa_assert(c);
 
     if (c->stream_fd != -1)
-        return 1664;
-    else
-        return 0;
+        rv = 1664;
+
+
+    return rv;
 }
 
 void pa_raop_client_set_callback(pa_raop_client *c, pa_raop_client_cb_t callback, void *userdata) {
