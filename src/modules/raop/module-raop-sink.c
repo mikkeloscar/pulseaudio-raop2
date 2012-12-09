@@ -282,21 +282,10 @@ static void sink_set_mute_cb(pa_sink *s) {
     }
 }
 
-static void raop_connection_cb(int fd, void *userdata) {
-    int so_sndbuf = 0;
-    socklen_t sl = sizeof(int);
+static void raop_record_cb(void *userdata) {
     struct userdata *u = userdata;
+
     pa_assert(u);
-
-    pa_assert(u->fd < 0);
-    u->fd = fd;
-
-    if (getsockopt(u->fd, SOL_SOCKET, SO_SNDBUF, &so_sndbuf, &sl) < 0)
-        pa_log_warn("getsockopt(SO_SNDBUF) failed: %s", pa_cstrerror(errno));
-    else {
-        pa_log_debug("SO_SNDBUF is %zu.", (size_t) so_sndbuf);
-        pa_sink_set_max_request(u->sink, PA_MAX((size_t) so_sndbuf, u->block_size));
-    }
 
     /* Set the initial volume. */
     sink_set_volume_cb(u->sink);
@@ -306,8 +295,9 @@ static void raop_connection_cb(int fd, void *userdata) {
     pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_CONNECTED, NULL, 0, NULL, NULL);
 }
 
-static void raop_close_cb(void *userdata) {
+static void raop_disconnected_cb(void *userdata) {
     struct userdata *u = userdata;
+
     pa_assert(u);
 
     pa_log_debug("Connection closed, informing IO thread...");
@@ -623,8 +613,8 @@ int pa__init(pa_module *m) {
         goto fail;
     }
 
-    pa_raop_client_set_callback(u->raop, raop_connection_cb, u);
-    pa_raop_client_set_closed_callback(u->raop, raop_close_cb, u);
+    pa_raop_client_set_record_callback(u->raop, raop_record_cb, u);
+    pa_raop_client_set_disconnected_callback(u->raop, raop_disconnected_cb, u);
 
     pa_raop_client_connect(u->raop);
 

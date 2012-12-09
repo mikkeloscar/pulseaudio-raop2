@@ -102,10 +102,10 @@ struct pa_raop_client {
     uint16_t seq;
     uint32_t rtptime;
 
-    pa_raop_client_cb_t callback;
-    void *userdata;
-    pa_raop_client_closed_cb_t closed_callback;
-    void *closed_userdata;
+    pa_raop_client_record_cb_t record_callback;
+    void *record_userdata;
+    pa_raop_client_disconnected_cb_t disconnected_callback;
+    void *disconnected_userdata;
 };
 
 /**
@@ -531,7 +531,7 @@ error:
         }
 
         case STATE_DISCONNECTED: {
-            pa_assert(c->closed_callback);
+            pa_assert(c->disconnected_callback);
             pa_assert(c->rtsp);
 
             pa_log_debug("RTSP control channel closed");
@@ -555,7 +555,7 @@ error:
             pa_xfree(c->sid);
             c->sid = NULL;
 
-            c->closed_callback(c->closed_userdata);
+            c->disconnected_callback(c->disconnected_userdata);
 
             break;
         }
@@ -779,16 +779,16 @@ int pa_raop_client_can_stream(pa_raop_client *c) {
     return rv;
 }
 
-void pa_raop_client_set_callback(pa_raop_client *c, pa_raop_client_cb_t callback, void *userdata) {
+void pa_raop_client_set_record_callback(pa_raop_client *c, pa_raop_client_record_cb_t callback, void *userdata) {
     pa_assert(c);
 
-    c->callback = callback;
-    c->userdata = userdata;
+    c->record_callback = callback;
+    c->record_userdata = userdata;
 }
 
-void pa_raop_client_set_closed_callback(pa_raop_client *c, pa_raop_client_closed_cb_t callback, void *userdata) {
+void pa_raop_client_set_disconnected_callback(pa_raop_client *c, pa_raop_client_disconnected_cb_t callback, void *userdata) {
     pa_assert(c);
 
-    c->closed_callback = callback;
-    c->closed_userdata = userdata;
+    c->disconnected_callback = callback;
+    c->disconnected_userdata = userdata;
 }
