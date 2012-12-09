@@ -479,6 +479,7 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
             if (c->control_fd <= 0 || c->timing_fd <= 0)
                 goto error;
 
+            c->setup_callback(c->control_fd, c->timing_fd, c->setup_userdata);
             pa_rtsp_record(c->rtsp, &c->seq, &c->rtptime);
 
             break;

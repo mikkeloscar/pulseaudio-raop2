@@ -100,6 +100,8 @@ struct userdata {
     pa_rtpoll_item *raop_rtpoll_item;
 
     pa_smoother *smoother;
+    int control_fd;
+    int timing_fd;
     int fd;
 
     int64_t offset;
@@ -207,6 +209,25 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             return 0;
         }
 
+        case SINK_MESSAGE_SETUP: {
+            struct pollfd *pollfd;
+
+            u->raop_rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, 2);
+            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
+
+            pollfd->fd = u->control_fd;
+            pollfd->events = POLLIN;
+            pollfd->revents = 0;
+
+            pollfd++;
+
+            pollfd->fd = u->timing_fd;
+            pollfd->events = POLLIN;
+            pollfd->revents = 0;
+
+            return 0;
+        }
+
         case SINK_MESSAGE_RECORD: {
             pa_rtpoll_set_timer_relative(u->rtpoll, pa_bytes_to_usec(u->block_size, &u->sink->sample_spec));
 
@@ -232,6 +253,8 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                 pa_module_unload_request(u->module, TRUE);
             }
 
+            u->control_fd = -1;
+            u->timing_fd = -1;
             return 0;
         }
     }
@@ -281,6 +304,17 @@ static void sink_set_mute_cb(pa_sink *s) {
     } else {
         sink_set_volume_cb(s);
     }
+}
+
+static void raop_setup_cb(int control_fd, int timing_fd, void *userdata) {
+    struct userdata *u = userdata;
+
+    pa_assert(u);
+
+    u->control_fd = control_fd;
+    u->timing_fd = timing_fd;
+
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_SETUP, NULL, 0, NULL, NULL);
 }
 
 static void raop_record_cb(void *userdata) {
@@ -614,6 +648,7 @@ int pa__init(pa_module *m) {
         goto fail;
     }
 
+    pa_raop_client_set_setup_callback(u->raop, raop_setup_cb, u);
     pa_raop_client_set_record_callback(u->raop, raop_record_cb, u);
     pa_raop_client_set_disconnected_callback(u->raop, raop_disconnected_cb, u);
 
