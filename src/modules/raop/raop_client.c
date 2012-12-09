@@ -102,8 +102,12 @@ struct pa_raop_client {
     uint16_t seq;
     uint32_t rtptime;
 
+    pa_raop_client_setup_cb_t setup_callback;
+    void *setup_userdata;
+
     pa_raop_client_record_cb_t record_callback;
     void *record_userdata;
+
     pa_raop_client_disconnected_cb_t disconnected_callback;
     void *disconnected_userdata;
 };
@@ -777,6 +781,13 @@ int pa_raop_client_can_stream(pa_raop_client *c) {
 
 
     return rv;
+}
+
+void pa_raop_client_set_setup_callback(pa_raop_client *c, pa_raop_client_setup_cb_t callback, void *userdata) {
+    pa_assert(c);
+
+    c->setup_callback = callback;
+    c->setup_userdata = userdata;
 }
 
 void pa_raop_client_set_record_callback(pa_raop_client *c, pa_raop_client_record_cb_t callback, void *userdata) {

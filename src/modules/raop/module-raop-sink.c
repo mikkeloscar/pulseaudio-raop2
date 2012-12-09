@@ -126,7 +126,8 @@ static const char* const valid_modargs[] = {
 };
 
 enum {
-    SINK_MESSAGE_CONNECTED = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_SETUP = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_RECORD,
     SINK_MESSAGE_DISCONNECTED
 };
 
@@ -206,7 +207,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             return 0;
         }
 
-        case SINK_MESSAGE_CONNECTED: {
+        case SINK_MESSAGE_RECORD: {
             pa_rtpoll_set_timer_relative(u->rtpoll, pa_bytes_to_usec(u->block_size, &u->sink->sample_spec));
 
             if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
@@ -292,7 +293,7 @@ static void raop_record_cb(void *userdata) {
 
     pa_log_debug("Connection authenticated, handing fd to IO thread...");
 
-    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_CONNECTED, NULL, 0, NULL, NULL);
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RECORD, NULL, 0, NULL, NULL);
 }
 
 static void raop_disconnected_cb(void *userdata) {

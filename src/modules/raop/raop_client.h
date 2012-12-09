@@ -40,6 +40,9 @@ int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume);
 int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded);
 int pa_raop_client_can_stream(pa_raop_client *c);
 
+typedef void (*pa_raop_client_setup_cb_t)(int control_fd, int timing_fd, void *userdata);
+void pa_raop_client_set_setup_callback(pa_raop_client *c, pa_raop_client_setup_cb_t callback, void *userdata);
+
 typedef void (*pa_raop_client_record_cb_t)(void *userdata);
 void pa_raop_client_set_record_callback(pa_raop_client *c, pa_raop_client_record_cb_t callback, void *userdata);
 
