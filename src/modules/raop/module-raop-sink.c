@@ -314,6 +314,8 @@ static void raop_setup_cb(int control_fd, int timing_fd, void *userdata) {
     u->control_fd = control_fd;
     u->timing_fd = timing_fd;
 
+    pa_log_debug("Connection authenticated, syncing with server...");
+
     pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_SETUP, NULL, 0, NULL, NULL);
 }
 
@@ -325,7 +327,7 @@ static void raop_record_cb(void *userdata) {
     /* Set the initial volume. */
     sink_set_volume_cb(u->sink);
 
-    pa_log_debug("Connection authenticated, handing fd to IO thread...");
+    pa_log_debug("Synchronization done, pushing job to IO thread...");
 
     pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RECORD, NULL, 0, NULL, NULL);
 }
