@@ -216,13 +216,13 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
 
             pollfd->fd = u->control_fd;
-            pollfd->events = POLLIN;
+            pollfd->events = POLLIN | POLLPRI;
             pollfd->revents = 0;
 
             pollfd++;
 
             pollfd->fd = u->timing_fd;
-            pollfd->events = POLLIN;
+            pollfd->events = POLLIN | POLLPRI;
             pollfd->revents = 0;
 
             return 0;
@@ -309,6 +309,8 @@ static void sink_set_mute_cb(pa_sink *s) {
 static void raop_setup_cb(int control_fd, int timing_fd, void *userdata) {
     struct userdata *u = userdata;
 
+    pa_assert(control_fd);
+    pa_assert(timing_fd);
     pa_assert(u);
 
     u->control_fd = control_fd;
@@ -354,21 +356,52 @@ static void thread_func(void *userdata) {
     pa_log_debug("Thread starting up");
 
     pa_thread_mq_install(&u->thread_mq);
-
     pa_smoother_set_time_offset(u->smoother, pa_rtclock_now());
 
     /* Create a chunk of memory that is our encoded silence sample. */
     pa_memchunk_reset(&silence);
 
     for (;;) {
-        int ret;
+        int rv;
 
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state))
             if (u->sink->thread_info.rewind_requested)
                 pa_sink_process_rewind(u->sink, 0);
 
+        /* Polling (audio data + control socket + timing socket). */
+        if ((rv = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
+            goto fail;
+        else if (rv == 0)
+            goto finish;
+
+        if (!pa_rtpoll_timer_elapsed(u->rtpoll)) {
+            struct pollfd *pollfd;
+            ssize_t packet_size;
+            uint8_t packet[32];
+
+            if (u->raop_rtpoll_item) {
+                pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
+                /* Event on the control socket ?? */
+                if (pollfd->revents & POLLIN) {
+                    pollfd->revents = 0;
+                }
+
+                pollfd++;
+                /* Event on the timing port ?? */
+                if (pollfd->revents & POLLIN) {
+                    pollfd->revents = 0;
+                    pa_log_debug("Received timing event.");
+                    packet_size = pa_read(pollfd->fd, packet, sizeof(packet), NULL);
+                    pa_raop_client_handle_timing_packet(u->raop, packet, packet_size);
+                }
+            }
+
+            continue;
+        }
+
         if (u->raop_rtpoll_item) {
             struct pollfd *pollfd;
+
             pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
 
             /* Render some data and write it to the fifo. */
@@ -500,30 +533,24 @@ static void thread_func(void *userdata) {
             pollfd->events = POLLOUT; /*PA_SINK_IS_OPENED(u->sink->thread_info.state)  ? POLLOUT : 0;*/
         }
 
-        if ((ret = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
-            goto fail;
+/*        if (u->raop_rtpoll_item) {*/
+/*            struct pollfd* pollfd;*/
 
-        if (ret == 0)
-            goto finish;
+/*            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);*/
 
-        if (u->raop_rtpoll_item) {
-            struct pollfd* pollfd;
+/*            if (pollfd->revents & ~POLLOUT) {*/
+/*                if (u->sink->thread_info.state != PA_SINK_SUSPENDED) {*/
+/*                    pa_log("FIFO shutdown.");*/
+/*                    goto fail;*/
+/*                }*/
 
-            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
-
-            if (pollfd->revents & ~POLLOUT) {
-                if (u->sink->thread_info.state != PA_SINK_SUSPENDED) {
-                    pa_log("FIFO shutdown.");
-                    goto fail;
-                }
-
-                /* We expect this to happen on occasion if we are not sending data.
-                 * It's perfectly natural and normal. */
-                if (u->raop_rtpoll_item)
-                    pa_rtpoll_item_free(u->raop_rtpoll_item);
-                u->raop_rtpoll_item = NULL;
-            }
-        }
+/*                /* We expect this to happen on occasion if we are not sending data
+/*                 * It's perfectly natural and normal. */
+/*                if (u->raop_rtpoll_item)*/
+/*                    pa_rtpoll_item_free(u->raop_rtpoll_item);*/
+/*                u->raop_rtpoll_item = NULL;*/
+/*            }*/
+/*        }*/
     }
 
 fail:

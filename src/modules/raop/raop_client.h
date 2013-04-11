@@ -38,6 +38,7 @@ int pa_raop_client_teardown(pa_raop_client *c);
 
 int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume);
 int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded);
+int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size);
 int pa_raop_client_can_stream(pa_raop_client *c);
 
 typedef void (*pa_raop_client_setup_cb_t)(int control_fd, int timing_fd, void *userdata);
