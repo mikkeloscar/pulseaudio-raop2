@@ -218,13 +218,13 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             pollfd->fd = u->control_fd;
             pollfd->events = POLLIN | POLLPRI;
             pollfd->revents = 0;
-
             pollfd++;
-
             pollfd->fd = u->timing_fd;
             pollfd->events = POLLIN | POLLPRI;
             pollfd->revents = 0;
 
+            u->control_fd = -1;
+            u->timing_fd = -1;
             return 0;
         }
 
@@ -285,9 +285,10 @@ static void sink_set_volume_cb(pa_sink *s) {
     /* Perform any software manipulation of the volume needed. */
     pa_sw_cvolume_divide(&s->soft_volume, &s->real_volume, &hw);
 
-    pa_log_debug("Requested volume: %s", pa_cvolume_snprint(t, sizeof(t), &s->real_volume));
-    pa_log_debug("Got hardware volume: %s", pa_cvolume_snprint(t, sizeof(t), &hw));
-    pa_log_debug("Calculated software volume: %s", pa_cvolume_snprint(t, sizeof(t), &s->soft_volume));
+    pa_log_debug("R[%s], H[%s], S[%s]",
+                 pa_cvolume_snprint(t, sizeof(t), &s->real_volume),
+                 pa_cvolume_snprint(t, sizeof(t), &hw),
+                 pa_cvolume_snprint(t, sizeof(t), &s->soft_volume));
 
     /* Any necessary software volume manipulation is done so set
      * our hw volume (or v as a single value) on the device. */
@@ -346,10 +347,6 @@ static void raop_disconnected_cb(void *userdata) {
 
 static void thread_func(void *userdata) {
     struct userdata *u = userdata;
-    int write_type = 0;
-    pa_memchunk silence;
-    uint32_t silence_overhead = 0;
-    double silence_ratio = 0;
 
     pa_assert(u);
 
@@ -358,11 +355,8 @@ static void thread_func(void *userdata) {
     pa_thread_mq_install(&u->thread_mq);
     pa_smoother_set_time_offset(u->smoother, pa_rtclock_now());
 
-    /* Create a chunk of memory that is our encoded silence sample. */
-    pa_memchunk_reset(&silence);
-
     for (;;) {
-        int rv;
+        int rv = 0;
 
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state))
             if (u->sink->thread_info.rewind_requested)
@@ -376,193 +370,43 @@ static void thread_func(void *userdata) {
 
         if (!pa_rtpoll_timer_elapsed(u->rtpoll)) {
             struct pollfd *pollfd;
-            ssize_t packet_size;
             uint8_t packet[32];
+            ssize_t read;
 
             if (u->raop_rtpoll_item) {
                 pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
+
                 /* Event on the control socket ?? */
                 if (pollfd->revents & POLLIN) {
                     pollfd->revents = 0;
+                    pa_log_debug("Received control packet.");
                 }
 
                 pollfd++;
+
                 /* Event on the timing port ?? */
                 if (pollfd->revents & POLLIN) {
                     pollfd->revents = 0;
-                    pa_log_debug("Received timing event.");
-                    packet_size = pa_read(pollfd->fd, packet, sizeof(packet), NULL);
-                    pa_raop_client_handle_timing_packet(u->raop, packet, packet_size);
+                    pa_log_debug("Received timing packet.");
+                    read = pa_read(pollfd->fd, packet, sizeof(packet), NULL);
+                    pa_raop_client_handle_timing_packet(u->raop, packet, read);
                 }
             }
 
             continue;
         }
 
-        if (u->raop_rtpoll_item) {
-            struct pollfd *pollfd;
-
-            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
-
-            /* Render some data and write it to the fifo. */
-            if (/*PA_SINK_IS_OPENED(u->sink->thread_info.state) && */pollfd->revents) {
-                pa_usec_t usec;
-                int64_t n;
-                void *p;
-
-                if (!silence.memblock) {
-                    pa_memchunk silence_tmp;
-
-                    pa_memchunk_reset(&silence_tmp);
-                    silence_tmp.memblock = pa_memblock_new(u->core->mempool, 4096);
-                    silence_tmp.length = 4096;
-                    p = pa_memblock_acquire(silence_tmp.memblock);
-                      memset(p, 0, 4096);
-                    pa_memblock_release(silence_tmp.memblock);
-                    pa_raop_client_encode_sample(u->raop, &silence_tmp, &silence);
-                    pa_assert(0 == silence_tmp.length);
-                    silence_overhead = silence_tmp.length - 4096;
-                    silence_ratio = silence_tmp.length / 4096;
-                    pa_memblock_unref(silence_tmp.memblock);
-                }
-
-                for (;;) {
-                    ssize_t l;
-
-                    if (u->encoded_memchunk.length <= 0) {
-                        if (u->encoded_memchunk.memblock)
-                            pa_memblock_unref(u->encoded_memchunk.memblock);
-                        if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
-                            size_t rl;
-
-                            /* We render real data. */
-                            if (u->raw_memchunk.length <= 0) {
-                                if (u->raw_memchunk.memblock)
-                                    pa_memblock_unref(u->raw_memchunk.memblock);
-                                pa_memchunk_reset(&u->raw_memchunk);
-
-                                /* Grab unencoded data. */
-                                pa_sink_render(u->sink, u->block_size, &u->raw_memchunk);
-                            }
-                            pa_assert(u->raw_memchunk.length > 0);
-
-                            /* Encode it. */
-                            rl = u->raw_memchunk.length;
-                            u->encoding_overhead += u->next_encoding_overhead;
-                            pa_raop_client_encode_sample(u->raop, &u->raw_memchunk, &u->encoded_memchunk);
-                            u->next_encoding_overhead = (u->encoded_memchunk.length - (rl - u->raw_memchunk.length));
-                            u->encoding_ratio = u->encoded_memchunk.length / (rl - u->raw_memchunk.length);
-                        } else {
-                            /* We render some silence into our memchunk. */
-                            memcpy(&u->encoded_memchunk, &silence, sizeof(pa_memchunk));
-                            pa_memblock_ref(silence.memblock);
-
-                            /* Calculate/store some values to be used with the smoother. */
-                            u->next_encoding_overhead = silence_overhead;
-                            u->encoding_ratio = silence_ratio;
-                        }
-                    }
-                    pa_assert(u->encoded_memchunk.length > 0);
-
-                    p = pa_memblock_acquire(u->encoded_memchunk.memblock);
-                    l = pa_write(u->fd, (uint8_t*) p + u->encoded_memchunk.index, u->encoded_memchunk.length, &write_type);
-                    pa_memblock_release(u->encoded_memchunk.memblock);
-
-                    pa_assert(l != 0);
-
-                    if (l < 0) {
-
-                        if (errno == EINTR)
-                            continue;
-                        else if (errno == EAGAIN) {
-
-                            /* OK, we filled all socket buffers up now. */
-                            goto filled_up;
-
-                        } else {
-                            pa_log("Failed to write data to FIFO: %s", pa_cstrerror(errno));
-                            goto fail;
-                        }
-
-                    } else {
-                        u->offset += l;
-
-                        u->encoded_memchunk.index += l;
-                        u->encoded_memchunk.length -= l;
-
-                        pollfd->revents = 0;
-
-                        if (u->encoded_memchunk.length > 0) {
-                            /* We've completely written the encoded data, so update our overhead. */
-                            u->encoding_overhead += u->next_encoding_overhead;
-
-                            /* OK, we wrote less that we asked for,
-                             * hence we can assume that the socket
-                             * buffers are full now. */
-                            goto filled_up;
-                        }
-                    }
-                }
-
-            filled_up:
-                /* At this spot we know that the socket buffers are
-                 * fully filled up. This is the best time to estimate
-                 * the playback position of the server. */
-
-                n = u->offset - u->encoding_overhead;
-
-#ifdef SIOCOUTQ
-                {
-                    int l;
-                    if (ioctl(u->fd, SIOCOUTQ, &l) >= 0 && l > 0)
-                        n -= (l / u->encoding_ratio);
-                }
-#endif
-
-                usec = pa_bytes_to_usec(n, &u->sink->sample_spec);
-
-                if (usec > u->latency)
-                    usec -= u->latency;
-                else
-                    usec = 0;
-
-                pa_smoother_put(u->smoother, pa_rtclock_now(), usec);
-            }
-
-            /* Hmm, nothing to do. Let's sleep... */
-            pollfd->events = POLLOUT; /*PA_SINK_IS_OPENED(u->sink->thread_info.state)  ? POLLOUT : 0;*/
-        }
-
-/*        if (u->raop_rtpoll_item) {*/
-/*            struct pollfd* pollfd;*/
-
-/*            pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);*/
-
-/*            if (pollfd->revents & ~POLLOUT) {*/
-/*                if (u->sink->thread_info.state != PA_SINK_SUSPENDED) {*/
-/*                    pa_log("FIFO shutdown.");*/
-/*                    goto fail;*/
-/*                }*/
-
-/*                /* We expect this to happen on occasion if we are not sending data
-/*                 * It's perfectly natural and normal. */
-/*                if (u->raop_rtpoll_item)*/
-/*                    pa_rtpoll_item_free(u->raop_rtpoll_item);*/
-/*                u->raop_rtpoll_item = NULL;*/
-/*            }*/
-/*        }*/
+        if (!pa_raop_client_can_stream(u->raop))
+            continue;
     }
 
 fail:
-    /* If this was no regular exit from the loop we have to continue
-     * processing messages until we received PA_MESSAGE_SHUTDOWN. */
+    /* If this was no regular exit, continue processing messages until PA_MESSAGE_SHUTDOWN. */
     pa_asyncmsgq_post(u->thread_mq.outq, PA_MSGOBJECT(u->core), PA_CORE_MESSAGE_UNLOAD_MODULE, u->module, 0, NULL, NULL);
     pa_asyncmsgq_wait_for(u->thread_mq.inq, PA_MESSAGE_SHUTDOWN);
 
 finish:
-    if (silence.memblock)
-        pa_memblock_unref(silence.memblock);
-    pa_log_debug("Thread shutting down.");
+    pa_log_debug("Thread shutting down");
 }
 
 int pa__init(pa_module *m) {
