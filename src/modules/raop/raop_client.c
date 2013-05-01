@@ -63,7 +63,6 @@
 
 #define JACK_STATUS_DISCONNECTED 0
 #define JACK_STATUS_CONNECTED 1
-
 #define JACK_TYPE_ANALOG 0
 #define JACK_TYPE_DIGITAL 1
 
@@ -72,17 +71,17 @@
 #define VOLUME_MAX 0
 
 #define DEFAULT_RAOP_PORT 5000
-
+#define DEFAULT_AUDIO_PORT 6000
 #define DEFAULT_CONTROL_PORT 6001
 #define DEFAULT_TIMING_PORT 6002
 
 typedef enum {
-    PAYLOAD_TIMING_REQUEST = 0x82,
-    PAYLOAD_TIMING_RESPONSE = 0x83,
-    PAYLOAD_TIME_SYNC = 0x84,
-    PAYLOAD_RETRANSMIT_REQUEST = 0x85,
-    PAYLOAD_RETRANSMIT_REPLY = 0x86,
-    PAYLOAD_AUDIO_DATA = 0x96
+    PAYLOAD_TIMING_REQUEST = 0x52,
+    PAYLOAD_TIMING_RESPONSE = 0x53,
+    PAYLOAD_SYNC_REQUEST = 0x54,
+    PAYLOAD_SYNC_RETRANSMIT_REQUEST = 0x55,
+    PAYLOAD_SYNC_RETRANSMIT_REPLY = 0x56,
+    PAYLOAD_AUDIO_DATA = 0x60
 } pa_raop_payload_type;
 
 struct pa_raop_client {
@@ -231,12 +230,14 @@ static inline void rtrimchar(char *str, char rc) {
 }
 
 static inline uint64_t timeval_to_ntp(struct timeval *tv) {
-    uint64_t ntp_timestamp;
+    uint64_t ntp = 0;
 
-    ntp_timestamp = (uint64_t) tv->tv_usec * UINT32_MAX / PA_USEC_PER_SEC;
-    ntp_timestamp |= (uint64_t) tv->tv_sec << 32;
+    /* Converting micro seconds to a fraction */
+    ntp = (uint64_t) tv->tv_usec * UINT32_MAX / PA_USEC_PER_SEC;
+    /* Moving reference from  1 Jan 1970 to 1 Jan 1900 (seconds) */
+    ntp |= (uint64_t) (tv->tv_sec + 0x83aa7e80) << 32;
 
-    return ntp_timestamp;
+    return ntp;
 }
 
 static int bind_socket(pa_raop_client *c, int fd, uint16_t port) {
@@ -248,15 +249,19 @@ static int bind_socket(pa_raop_client *c, int fd, uint16_t port) {
     socklen_t salen;
     int one = 1;
 
+    pa_zero(sa4);
+#ifdef HAVE_IPV6
+    pa_zero(sa6);
+#endif
     if (inet_pton(AF_INET, pa_rtsp_localip(c->rtsp), &sa4.sin_addr) > 0) {
         sa4.sin_family = AF_INET;
-        sa4.sin_port = htons((uint16_t) port);
+        sa4.sin_port = htons(port);
         sa = (struct sockaddr *) &sa4;
         salen = sizeof(sa4);
 #ifdef HAVE_IPV6
     } else if (inet_pton(AF_INET6, pa_rtsp_localip(c->rtsp), &sa6.sin6_addr) > 0) {
         sa6.sin6_family = AF_INET6;
-        sa6.sin6_port = htons((uint16_t) port);
+        sa6.sin6_port = htons(port);
         sa = (struct sockaddr*) &sa6;
         salen = sizeof(sa6);
 #endif
@@ -264,14 +269,21 @@ static int bind_socket(pa_raop_client *c, int fd, uint16_t port) {
         pa_log("Invalid destination '%s'", c->host);
         goto fail;
     }
+
+    one = 1;
+#ifdef SO_TIMESTAMP
     if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one)) < 0) {
-        pa_log("SO_TIMESTAMP failed: %s", pa_cstrerror(errno));
+        pa_log("setsockopt(SO_TIMESTAMP) failed: %s", pa_cstrerror(errno));
         goto fail;
     }
+#else
+    pa_log("SO_TIMESTAMP unsupported on this platform");
+    goto fail;
+#endif
 
     one = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
-        pa_log("SO_REUSEADDR failed: %s", pa_cstrerror(errno));
+        pa_log("setsockopt(SO_REUSEADDR) failed: %s", pa_cstrerror(errno));
         goto fail;
     }
 
@@ -287,30 +299,29 @@ fail:
 }
 
 static int open_udp_socket(pa_raop_client *c, uint16_t port, uint16_t should_bind) {
-    int fd = -1;
-    sa_family_t af;
     struct sockaddr_in sa4;
 #ifdef HAVE_IPV6
     struct sockaddr_in6 sa6;
 #endif
     struct sockaddr *sa;
     socklen_t salen;
-    int one;
+    sa_family_t af;
+    int fd = -1;
 
+    pa_zero(sa4);
+#ifdef HAVE_IPV6
+    pa_zero(sa6);
+#endif
     if (inet_pton(AF_INET, c->host, &sa4.sin_addr) > 0) {
-        pa_zero(sa4);
         sa4.sin_family = af = AF_INET;
-        sa4.sin_addr.s_addr = htonl(INADDR_ANY);
         sa4.sin_port = htons(port);
         sa = (struct sockaddr *) &sa4;
         salen = sizeof(sa4);
 #ifdef HAVE_IPV6
     } else if (inet_pton(AF_INET6, c->host, &sa6.sin6_addr) > 0) {
-        pa_zero(sa6);
         sa6.sin6_family = af = AF_INET6;
-        //sa6.sin6_addr.s6_addr = htonl(INADDR_ANY);
         sa6.sin6_port = htons(port);
-        sa = (struct sockaddr*) &sa6;
+        sa = (struct sockaddr *) &sa6;
         salen = sizeof(sa6);
 #endif
     } else {
@@ -327,38 +338,19 @@ static int open_udp_socket(pa_raop_client *c, uint16_t port, uint16_t should_bin
     pa_make_udp_socket_low_delay(fd);
     pa_make_fd_nonblock(fd);
 
-    one = 1;
-#ifdef SO_TIMESTAMP
-    if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one)) < 0) {
-        pa_log("SO_TIMESTAMP failed: %s", pa_cstrerror(errno));
+    if (should_bind) {
+        if (bind_socket(c, fd, port) < 0) {
+            pa_log("bind_socket() failed: %s", pa_cstrerror(errno));
+            goto fail;
+        }
+    }
+
+    if (connect(fd, sa, salen) < 0) {
+        pa_log("connect() failed: %s", pa_cstrerror(errno));
         goto fail;
     }
-#else
-    pa_log("SO_TIMESTAMP unsupported on this platform");
-    goto fail;
-#endif
 
-    if (should_bind) {
-        one = 1;
-        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
-            pa_log("SO_REUSEADDR failed: %s", pa_cstrerror(errno));
-            goto fail;
-        }
-
-        if (bind(fd, sa, salen) < 0) {
-            pa_log("bind() failed: %s", pa_cstrerror(errno));
-            goto fail;
-        }
-
-        if (af == AF_INET || af == AF_INET6) {
-            if (connect(fd, sa, salen) < 0) {
-                pa_log("connect() failed: %s", pa_cstrerror(errno));
-                goto fail;
-            }
-            pa_log("Connection done");
-        }
-    }
-
+    pa_log_debug("Connected to %s on port %d (SOCK_DGRAM)", c->host, port);
     return fd;
 
 fail:
@@ -728,7 +720,7 @@ int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume) {
     else if (db > VOLUME_MAX)
         db = VOLUME_MAX;
 
-    param = pa_sprintf_malloc("volume: %0.6f\r\n",  db);
+    param = pa_sprintf_malloc("volume: %0.6f\r\n", db);
 
     /* We just hit and hope, cannot wait for the callback. */
     rv = pa_rtsp_setparameter(c->rtsp, param);
@@ -750,7 +742,7 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
         0x24, 0x00, 0x00, 0x00,
         0xF0, 0xFF, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
     };
     int header_size = sizeof(header);
     int rv = 0;
@@ -820,25 +812,23 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
 }
 
 int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size) {
-    uint8_t payload_type;
     uint8_t response[32];
     struct timeval tv;
-    uint64_t receive_timestamp = 0;
-    uint64_t transmit_timestamp = 0;
+    uint64_t rci = 0, trs = 0;
     ssize_t written = 0;
+    uint8_t pt;
     int rv = 1;
     int i;
 
+    /* RTP v2, payload_type = 83, seq_num = 0x0007, timestamp = 0 */
     static const uint8_t header[] = {
-        0x80, /* RTP protocol version 2. */
-        0xd3, /* Payload type = 83 + marker bit set = 211. */
-        0x00, 0x07, /* Sequence number = 7. */
-        0x00, 0x00, 0x00, 0x00 /* Timestamp = 0. */
+        0x80, 0xd3, 0x00, 0x07,
+        0x00, 0x00, 0x00, 0x00
     };
 
     pa_assert(c);
 
-    /* Timing packets are always 32 bytes long: 1 x 8 RTP header (no ssrc) + 3 x 8 NTP timestamps */
+    /* Timing packets are 32 bytes long: 1 x 8 RTP header (no ssrc) + 3 x 8 NTP timestamps */
     if (packet_size != 32)
     {
         pa_log_debug("Invalid timing packet: size mismatch.");
@@ -846,48 +836,46 @@ int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[
     }
 
     if (packet[0] != 0x80) {
-        pa_log_debug("Invalid timing packet: got 0x%02x instead of 0x80.", packet[0]);
+        pa_log_debug("Invalid timing packet: version or control mismatch (0x%02x).", packet[0]);
         return rv;
     }
 
-    payload_type = packet[1];
-    receive_timestamp = timeval_to_ntp(pa_rtclock_get(&tv));
-    switch (payload_type) {
+    rci = timeval_to_ntp(pa_rtclock_get(&tv));
+    /* The market bit is always set (see rfc3550) ! */
+    pt = packet[1] ^ 0x80;
+    switch (pt) {
         case PAYLOAD_TIMING_REQUEST:
-            /* Header is always the same ! */
             memcpy(response, header, sizeof(header));
             /* Copying originate timestamp from the incoming request packet. */
             for (i = 8; i < 16; i++)
                 response[i] = packet[i + 16];
-            /* Set the receive timestamp to current time. */
-            response[16] = (uint8_t ) ((receive_timestamp & 0xff00000000000000ULL) >> 56);
-            response[17] = (uint8_t ) ((receive_timestamp & 0x00ff000000000000ULL) >> 48);
-            response[18] = (uint8_t ) ((receive_timestamp & 0x0000ff0000000000ULL) >> 40);
-            response[19] = (uint8_t ) ((receive_timestamp & 0x000000ff00000000ULL) >> 32);
-            response[20] = (uint8_t ) ((receive_timestamp & 0x00000000ff000000ULL) >> 24);
-            response[21] = (uint8_t ) ((receive_timestamp & 0x0000000000ff0000ULL) >> 16);
-            response[22] = (uint8_t ) ((receive_timestamp & 0x000000000000ff00ULL) >> 8);
-            response[23] = (uint8_t )  (receive_timestamp & 0x00000000000000ffULL);
+            /* Set the receive timestamp to reception time. */
+            response[16] = (uint8_t ) ((rci & 0xff00000000000000ULL) >> 56);
+            response[17] = (uint8_t ) ((rci & 0x00ff000000000000ULL) >> 48);
+            response[18] = (uint8_t ) ((rci & 0x0000ff0000000000ULL) >> 40);
+            response[19] = (uint8_t ) ((rci & 0x000000ff00000000ULL) >> 32);
+            response[20] = (uint8_t ) ((rci & 0x00000000ff000000ULL) >> 24);
+            response[21] = (uint8_t ) ((rci & 0x0000000000ff0000ULL) >> 16);
+            response[22] = (uint8_t ) ((rci & 0x000000000000ff00ULL) >> 8);
+            response[23] = (uint8_t )  (rci & 0x00000000000000ffULL);
             /* Set the transmit timestamp to current time. */
-            transmit_timestamp = timeval_to_ntp(pa_rtclock_get(&tv));
-            response[16] = (uint8_t ) ((transmit_timestamp & 0xff00000000000000ULL) >> 56);
-            response[17] = (uint8_t ) ((transmit_timestamp & 0x00ff000000000000ULL) >> 48);
-            response[18] = (uint8_t ) ((transmit_timestamp & 0x0000ff0000000000ULL) >> 40);
-            response[19] = (uint8_t ) ((transmit_timestamp & 0x000000ff00000000ULL) >> 32);
-            response[20] = (uint8_t ) ((transmit_timestamp & 0x00000000ff000000ULL) >> 24);
-            response[21] = (uint8_t ) ((transmit_timestamp & 0x0000000000ff0000ULL) >> 16);
-            response[22] = (uint8_t ) ((transmit_timestamp & 0x000000000000ff00ULL) >> 8);
-            response[23] = (uint8_t )  (transmit_timestamp & 0x00000000000000ffULL);
-            if ((written = pa_loop_write(c->timing_fd, response, sizeof(response), NULL)) == sizeof(response))
+            trs = timeval_to_ntp(pa_rtclock_get(&tv));
+            response[24] = (uint8_t ) ((trs & 0xff00000000000000ULL) >> 56);
+            response[25] = (uint8_t ) ((trs & 0x00ff000000000000ULL) >> 48);
+            response[26] = (uint8_t ) ((trs & 0x0000ff0000000000ULL) >> 40);
+            response[27] = (uint8_t ) ((trs & 0x000000ff00000000ULL) >> 32);
+            response[28] = (uint8_t ) ((trs & 0x00000000ff000000ULL) >> 24);
+            response[29] = (uint8_t ) ((trs & 0x0000000000ff0000ULL) >> 16);
+            response[30] = (uint8_t ) ((trs & 0x000000000000ff00ULL) >> 8);
+            response[31] = (uint8_t )  (trs & 0x00000000000000ffULL);
+
+            written = pa_loop_write(c->timing_fd, response, sizeof(response), NULL);
+            if (written == sizeof(response))
                 rv = 0;
             break;
         case PAYLOAD_TIMING_RESPONSE:
             pa_log_debug("Recieved an unexpected timing response...");
             break;
-        case PAYLOAD_RETRANSMIT_REQUEST:
-            pa_log_debug("Timing packet resend not implemented...");
-            break;
-        case PAYLOAD_RETRANSMIT_REPLY:
         default:
             pa_log_debug("Got an unexpected payload type on timing channel !");
             break;
