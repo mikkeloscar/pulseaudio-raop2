@@ -59,6 +59,7 @@
 #include "rtsp_client.h"
 #include "base64.h"
 
+#define FRAMES_PER_PACKET 352
 #define AES_CHUNKSIZE 16
 
 #define JACK_STATUS_DISCONNECTED 0
@@ -78,9 +79,9 @@
 typedef enum {
     PAYLOAD_TIMING_REQUEST = 0x52,
     PAYLOAD_TIMING_RESPONSE = 0x53,
-    PAYLOAD_SYNC_REQUEST = 0x54,
-    PAYLOAD_SYNC_RETRANSMIT_REQUEST = 0x55,
-    PAYLOAD_SYNC_RETRANSMIT_REPLY = 0x56,
+    PAYLOAD_SYNCHRONIZATION = 0x54,
+    PAYLOAD_RETRANSMIT_REQUEST = 0x55,
+    PAYLOAD_RETRANSMIT_REPLY = 0x56,
     PAYLOAD_AUDIO_DATA = 0x60
 } pa_raop_payload_type;
 
@@ -414,10 +415,14 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
                 "t=0 0\r\n"
                 "m=audio 0 RTP/AVP 96\r\n"
                 "a=rtpmap:96 AppleLossless\r\n"
-                "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
+                "a=fmtp:96 %d 0 16 40 10 14 2 255 0 0 44100\r\n"
                 "a=rsaaeskey:%s\r\n"
                 "a=aesiv:%s\r\n",
-                c->sid, ip, c->host, key, iv);
+                c->sid, ip,
+                c->host,
+                FRAMES_PER_PACKET,
+                key,
+                iv);
 
             pa_rtsp_announce(c->rtsp, sdp);
 
@@ -549,14 +554,13 @@ error:
         }
 
         case STATE_RECORD: {
-            long latency = 0;
+            int32_t latency = 0;
             char *alt;
 
             alt = pa_xstrdup(pa_headerlist_gets(headers, "Audio-Latency"));
 
-            if (alt) {
-                latency = atoi(alt);
-            }
+            if (alt)
+                pa_atoi(alt, &latency);
 
             c->record_callback(c->setup_userdata);
 
@@ -731,20 +735,20 @@ int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[
     struct timeval tv;
     uint64_t rci = 0, trs = 0;
     ssize_t written = 0;
-    uint8_t pt;
+    uint8_t plt;
     int rv = 1;
     int i;
 
-    /* RTP v2, payload_type = 83, seq_num = 0x0007, timestamp = 0. */
-    static const uint8_t header[] = {
-        0x80, 0xd3, 0x00, 0x07,
+    /* RTP v2, seq_num = 0x0007, timestamp = 0. */
+    static uint8_t header[] = {
+        0x80, 0x00, 0x00, 0x07,
         0x00, 0x00, 0x00, 0x00
     };
 
     pa_assert(c);
 
     /* Timing packets are 32 bytes long: 1 x 8 RTP header (no ssrc) + 3 x 8 NTP timestamps. */
-    if (packet_size != 32)
+    if (packet == NULL || packet_size != 32)
     {
         pa_log_debug("Invalid timing packet: size mismatch.");
         return rv;
@@ -757,43 +761,107 @@ int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[
 
     rci = timeval_to_ntp(pa_rtclock_get(&tv));
     /* The market bit is always set (see rfc3550) ! */
-    pt = packet[1] ^ 0x80;
-    switch (pt) {
+    plt = packet[1] ^ 0x80;
+    switch (plt) {
         case PAYLOAD_TIMING_REQUEST:
             memcpy(response, header, sizeof(header));
+            response[1] = 0x80 | PAYLOAD_TIMING_RESPONSE;
+            pa_log_debug("%d   %x", response[1], response[1]);
             /* Copying originate timestamp from the incoming request packet. */
             for (i = 8; i < 16; i++)
                 response[i] = packet[i + 16];
             /* Set the receive timestamp to reception time. */
-            response[16] = (uint8_t ) ((rci & 0xff00000000000000ULL) >> 56);
-            response[17] = (uint8_t ) ((rci & 0x00ff000000000000ULL) >> 48);
-            response[18] = (uint8_t ) ((rci & 0x0000ff0000000000ULL) >> 40);
-            response[19] = (uint8_t ) ((rci & 0x000000ff00000000ULL) >> 32);
-            response[20] = (uint8_t ) ((rci & 0x00000000ff000000ULL) >> 24);
-            response[21] = (uint8_t ) ((rci & 0x0000000000ff0000ULL) >> 16);
-            response[22] = (uint8_t ) ((rci & 0x000000000000ff00ULL) >> 8);
-            response[23] = (uint8_t )  (rci & 0x00000000000000ffULL);
+            response[16] = (uint8_t) ((rci & 0xff00000000000000) >> 56);
+            response[17] = (uint8_t) ((rci & 0x00ff000000000000) >> 48);
+            response[18] = (uint8_t) ((rci & 0x0000ff0000000000) >> 40);
+            response[19] = (uint8_t) ((rci & 0x000000ff00000000) >> 32);
+            response[20] = (uint8_t) ((rci & 0x00000000ff000000) >> 24);
+            response[21] = (uint8_t) ((rci & 0x0000000000ff0000) >> 16);
+            response[22] = (uint8_t) ((rci & 0x000000000000ff00) >> 8);
+            response[23] = (uint8_t)  (rci & 0x00000000000000ff);
             /* Set the transmit timestamp to current time. */
             trs = timeval_to_ntp(pa_rtclock_get(&tv));
-            response[24] = (uint8_t ) ((trs & 0xff00000000000000ULL) >> 56);
-            response[25] = (uint8_t ) ((trs & 0x00ff000000000000ULL) >> 48);
-            response[26] = (uint8_t ) ((trs & 0x0000ff0000000000ULL) >> 40);
-            response[27] = (uint8_t ) ((trs & 0x000000ff00000000ULL) >> 32);
-            response[28] = (uint8_t ) ((trs & 0x00000000ff000000ULL) >> 24);
-            response[29] = (uint8_t ) ((trs & 0x0000000000ff0000ULL) >> 16);
-            response[30] = (uint8_t ) ((trs & 0x000000000000ff00ULL) >> 8);
-            response[31] = (uint8_t )  (trs & 0x00000000000000ffULL);
+            response[24] = (uint8_t) ((trs & 0xff00000000000000) >> 56);
+            response[25] = (uint8_t) ((trs & 0x00ff000000000000) >> 48);
+            response[26] = (uint8_t) ((trs & 0x0000ff0000000000) >> 40);
+            response[27] = (uint8_t) ((trs & 0x000000ff00000000) >> 32);
+            response[28] = (uint8_t) ((trs & 0x00000000ff000000) >> 24);
+            response[29] = (uint8_t) ((trs & 0x0000000000ff0000) >> 16);
+            response[30] = (uint8_t) ((trs & 0x000000000000ff00) >> 8);
+            response[31] = (uint8_t)  (trs & 0x00000000000000ff);
 
             written = pa_loop_write(c->timing_fd, response, sizeof(response), NULL);
             if (written == sizeof(response))
                 rv = 0;
             break;
         case PAYLOAD_TIMING_RESPONSE:
-            pa_log_debug("Recieved an unexpected timing response...");
-            break;
         default:
             pa_log_debug("Got an unexpected payload type on timing channel !");
             break;
+    }
+
+    return rv;
+}
+
+int pa_raop_client_handle_control_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size) {
+    uint8_t response[20];
+    struct timeval tv;
+    uint64_t trs = 0;
+    uint32_t tms = 0;
+    uint8_t plt;
+    int rv = 1;
+
+    /* RTP v2, seq_num = 0x0007, timestamp = 0. */
+    static uint8_t header[] = {
+        0x80, 0x00, 0x00, 0x07
+    };
+
+    pa_assert(c);
+
+    /* No input packet == send a sync one ! */
+    if (packet_size <= 0 || packet == NULL)
+    {
+        memcpy(response, header, sizeof(header));
+        if (c->seq == 0)
+            response[0] = 0x10 | response[0];
+        response[1] = 0x80 | PAYLOAD_SYNCHRONIZATION;
+        /* Write current timestamp. */
+        tms = c->rtptime;
+        response[4] = (uint8_t) ((tms & 0xff000000) >> 24);
+        response[5] = (uint8_t) ((tms & 0x00ff0000) >> 16);
+        response[6] = (uint8_t) ((tms & 0x0000ff00) >> 8);
+        response[7] = (uint8_t)  (tms & 0x000000ff);
+        /* Set the transmit timestamp to current time. */
+        trs = timeval_to_ntp(pa_rtclock_get(&tv));
+        response[8] =  (uint8_t) ((trs & 0xff00000000000000) >> 56);
+        response[9] =  (uint8_t) ((trs & 0x00ff000000000000) >> 48);
+        response[10] = (uint8_t) ((trs & 0x0000ff0000000000) >> 40);
+        response[11] = (uint8_t) ((trs & 0x000000ff00000000) >> 32);
+        response[12] = (uint8_t) ((trs & 0x00000000ff000000) >> 24);
+        response[13] = (uint8_t) ((trs & 0x0000000000ff0000) >> 16);
+        response[14] = (uint8_t) ((trs & 0x000000000000ff00) >> 8);
+        response[15] = (uint8_t)  (trs & 0x00000000000000ff);
+        /* Write next timestamp. */
+        tms += FRAMES_PER_PACKET;
+        response[16] = (uint8_t) ((tms & 0xff000000) >> 24);
+        response[17] = (uint8_t) ((tms & 0x00ff0000) >> 16);
+        response[18] = (uint8_t) ((tms & 0x0000ff00) >> 8);
+        response[19] = (uint8_t)  (tms & 0x000000ff);
+    } else {
+        if (packet[0] != 0x80) {
+            pa_log_debug("Invalid timing packet: version or control mismatch (0x%02x).", packet[0]);
+            return rv;
+        }
+
+        plt = packet[1] ^ 0x80;
+        switch (plt) {
+            case PAYLOAD_RETRANSMIT_REQUEST:
+                /* Packet retransmission not implemented yet... */
+            case PAYLOAD_RETRANSMIT_REPLY:
+            default:
+                pa_log_debug("Got an unexpected payload type on control channel !");
+                break;
+        }
     }
 
     return rv;
