@@ -48,7 +48,6 @@
 #include <pulsecore/core-util.h>
 #include <pulsecore/modargs.h>
 #include <pulsecore/log.h>
-#include <pulsecore/socket-client.h>
 #include <pulsecore/thread-mq.h>
 #include <pulsecore/thread.h>
 #include <pulsecore/time-smoother.h>
@@ -83,6 +82,7 @@ struct userdata {
     pa_thread *thread;
     pa_thread_mq thread_mq;
     pa_rtpoll *rtpoll;
+    pa_rtpoll_item *raop_rtpoll_item;
 
     pa_memchunk raw_memchunk;
     pa_memchunk encoded_memchunk;
@@ -94,10 +94,7 @@ struct userdata {
     size_t read_length, read_index;
 
     pa_usec_t latency;
-
     unsigned int rate;
-
-    pa_rtpoll_item *raop_rtpoll_item;
 
     pa_smoother *smoother;
     int control_fd;
@@ -380,6 +377,8 @@ static void thread_func(void *userdata) {
                 if (pollfd->revents & POLLIN) {
                     pollfd->revents = 0;
                     pa_log_debug("Received control packet.");
+                    read = pa_read(pollfd->fd, packet, sizeof(packet), NULL);
+                    pa_raop_client_handle_control_packet(u->raop, packet, read);
                 }
 
                 pollfd++;
