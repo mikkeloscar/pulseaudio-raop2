@@ -103,7 +103,6 @@ struct userdata {
 
     int64_t offset;
     int64_t encoding_overhead;
-    int32_t next_encoding_overhead;
     double encoding_ratio;
 
     pa_raop_client *raop;
@@ -145,7 +144,7 @@ static pa_usec_t sink_get_latency(struct userdata *u) {
                                        + (u->encoded_memchunk.length / u->encoding_ratio),
                                        &u->sink->sample_spec)
                       - (int64_t) now2;
-
+pa_log_debug("latency: %ld", delay);
     r = delay >= 0 ? (pa_usec_t) delay : 0;
 
     return r;
@@ -159,16 +158,19 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             switch ((pa_sink_state_t) PA_PTR_TO_UINT(data)) {
                 case PA_SINK_SUSPENDED:
                     pa_assert(PA_SINK_IS_OPENED(u->sink->thread_info.state));
-
+pa_log_debug("RAOP: SUSPENDED");
                     pa_smoother_pause(u->smoother, pa_rtclock_now());
 
-                    /* Issue a FLUSH if we are connected. */
-                    if (pa_raop_client_can_stream(u->raop))
+                    if (pa_raop_client_can_stream(u->raop)) {
+                        /* Issue a TEARDOWN if we are still connected. */
                         pa_raop_client_teardown(u->raop);
+                    }
 
                     break;
 
                 case PA_SINK_IDLE:
+pa_log_debug("RAOP: IDLE");
+                    /* Issue a flush if we're comming from running state. */
                     if (u->sink->thread_info.state == PA_SINK_RUNNING) {
                         pa_rtpoll_set_timer_disabled(u->rtpoll);
                         pa_raop_client_flush(u->raop);
@@ -179,11 +181,11 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                 case PA_SINK_RUNNING:
                     if (u->sink->thread_info.state == PA_SINK_SUSPENDED)
                         pa_smoother_resume(u->smoother, pa_rtclock_now(), TRUE);
-
-                    /* The connection can be closed when idle, so check to
-                     * see if we need to reestablish it. */
-                    if (!pa_raop_client_can_stream(u->raop))
+pa_log_debug("RAOP: RUNNING");
+                    if (!pa_raop_client_can_stream(u->raop)) {
+                        /* Connecting will trigger a RECORD */
                         pa_raop_client_connect(u->raop);
+                    }
 
                     break;
 
@@ -238,8 +240,6 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
 
         case SINK_MESSAGE_DISCONNECTED: {
             if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
-                pa_log_debug("RTSP control connection closed, but we're suspended so let's not worry about it... we'll open it again later");
-
                 pa_rtpoll_set_timer_disabled(u->rtpoll);
                 if (u->raop_rtpoll_item)
                     pa_rtpoll_item_free(u->raop_rtpoll_item);
@@ -353,11 +353,16 @@ static void thread_func(void *userdata) {
     pa_smoother_set_time_offset(u->smoother, pa_rtclock_now());
 
     for (;;) {
+        pa_usec_t estimated;
+        int32_t overhead = 0;
+        ssize_t written = 0;
+        size_t length = 0;
         int rv = 0;
 
-        if (PA_SINK_IS_OPENED(u->sink->thread_info.state))
+        if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             if (u->sink->thread_info.rewind_requested)
                 pa_sink_process_rewind(u->sink, 0);
+        }
 
         /* Polling (audio data + control socket + timing socket). */
         if ((rv = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
@@ -397,6 +402,47 @@ static void thread_func(void *userdata) {
 
         if (!pa_raop_client_can_stream(u->raop))
             continue;
+        if (u->sink->thread_info.state != PA_SINK_RUNNING)
+            continue;
+
+        if (u->encoded_memchunk.length <= 0) {
+            if (u->encoded_memchunk.memblock != NULL)
+                pa_memblock_unref(u->encoded_memchunk.memblock);
+
+            if (u->raw_memchunk.length <= 0) {
+                if (u->raw_memchunk.memblock)
+                    pa_memblock_unref(u->raw_memchunk.memblock);
+                pa_memchunk_reset(&u->raw_memchunk);
+
+                /* Grab unencoded audio data from PulseAudio. */
+                pa_sink_render_full(u->sink, u->block_size, &u->raw_memchunk);
+            }
+
+            pa_assert(u->raw_memchunk.length > 0);
+
+            length = u->raw_memchunk.length;
+            pa_raop_client_encode_block(u->raop, &u->raw_memchunk, &u->encoded_memchunk);
+            u->encoding_ratio = (double) u->encoded_memchunk.length / (double) (length - u->raw_memchunk.length);
+            overhead = u->encoded_memchunk.length - (length - u->raw_memchunk.length);
+        }
+
+        pa_assert(u->encoded_memchunk.length > 0);
+
+        pa_raop_client_send_audio_packet(u->raop, &u->encoded_memchunk, &written);
+        pa_rtpoll_set_timer_relative(u->rtpoll, pa_bytes_to_usec(u->block_size, &u->sink->sample_spec));
+
+        pa_assert(written != 0);
+
+        if (written < 0) {
+            pa_log("Failed to write data to FIFO: %s", pa_cstrerror(errno));
+            goto fail;
+        }
+
+        u->offset += written;
+        u->encoding_overhead += overhead;
+
+        estimated = pa_bytes_to_usec(u->offset - u->encoding_overhead, &u->sink->sample_spec);
+        pa_smoother_put(u->smoother, pa_rtclock_now(), estimated);
     }
 
 fail:
@@ -460,7 +506,6 @@ int pa__init(pa_module *m) {
 
     u->offset = 0;
     u->encoding_overhead = 0;
-    u->next_encoding_overhead = 0;
     u->encoding_ratio = 1.0;
 
     u->rtpoll = pa_rtpoll_new();
@@ -468,8 +513,6 @@ int pa__init(pa_module *m) {
     u->raop_rtpoll_item = NULL;
 
     u->rate = ss.rate;
-
-    u->block_size = pa_usec_to_bytes(PA_USEC_PER_SEC / 20, &ss);
 
     u->read_data = u->write_data = NULL;
     u->write_index = u->write_length = 0;
@@ -515,16 +558,19 @@ int pa__init(pa_module *m) {
     pa_sink_set_rtpoll(u->sink, u->rtpoll);
     u->sink->userdata = u;
 
-    if (!(u->raop = pa_raop_client_new(u->core, server))) {
+    if (!(u->raop = pa_raop_client_new(u->core, server, ss))) {
         pa_log("Failed to connect to server.");
         goto fail;
     }
 
+    /* The number of frames per blocks is not negotiable... */
+    pa_raop_client_get_blocks_size(u->raop, &u->block_size);
+    u->block_size *= pa_frame_size(&ss);
+    pa_sink_set_max_request(u->sink, u->block_size);
+
     pa_raop_client_set_setup_callback(u->raop, raop_setup_cb, u);
     pa_raop_client_set_record_callback(u->raop, raop_record_cb, u);
     pa_raop_client_set_disconnected_callback(u->raop, raop_disconnected_cb, u);
-
-    pa_raop_client_connect(u->raop);
 
     if (!(u->thread = pa_thread_new("raop-sink", thread_func, u))) {
         pa_log("Failed to create thread.");

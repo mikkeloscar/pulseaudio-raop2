@@ -22,6 +22,7 @@
   USA.
 ***/
 
+#include <pulse/sample.h>
 #include <pulse/volume.h>
 
 #include <pulsecore/core.h>
@@ -29,7 +30,7 @@
 
 typedef struct pa_raop_client pa_raop_client;
 
-pa_raop_client* pa_raop_client_new(pa_core *core, const char *host);
+pa_raop_client* pa_raop_client_new(pa_core *core, const char *host, pa_sample_spec spec);
 void pa_raop_client_free(pa_raop_client *c);
 
 int pa_raop_client_connect(pa_raop_client *c);
@@ -37,11 +38,11 @@ int pa_raop_client_flush(pa_raop_client *c);
 int pa_raop_client_teardown(pa_raop_client *c);
 
 int pa_raop_client_can_stream(pa_raop_client *c);
-
-int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size);
-int pa_raop_client_handle_control_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size);
-int pa_raop_client_synchronize_timestamps(pa_raop_client *c, uint32_t stamp);
-int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded);
+int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[], ssize_t size);
+int pa_raop_client_handle_control_packet(pa_raop_client *c, const uint8_t packet[], ssize_t size);
+int pa_raop_client_get_blocks_size(pa_raop_client *c, size_t *size);
+int pa_raop_client_encode_block(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded);
+int pa_raop_client_send_audio_packet(pa_raop_client *c, pa_memchunk *block, ssize_t *written);
 
 int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume);
 

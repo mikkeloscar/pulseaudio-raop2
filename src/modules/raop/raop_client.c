@@ -111,6 +111,11 @@ struct pa_raop_client {
 
     uint16_t seq;
     uint32_t rtptime;
+    uint32_t ssrc;
+
+    pa_bool_t first_packet;
+    uint32_t sync_interval;
+    uint32_t sync_count;
 
     pa_raop_client_setup_cb_t setup_callback;
     void *setup_userdata;
@@ -122,55 +127,97 @@ struct pa_raop_client {
     void *disconnected_userdata;
 };
 
+/* Timming packet header (8x8):
+ *  [0]   RTP v2: 0x80,
+ *  [1]   Playload type: 0x53 | marker bit: 0x80,
+ *  [2,3] Sequence number: 0x0007,
+ *  [4,7] Timestamp: 0x00000000 (unused). */
+static const uint8_t timming_header[8] = {
+    0x80, 0xd3, 0x00, 0x07,
+    0x00, 0x00, 0x00, 0x00
+};
+
+/* Sync packet header (8x8):
+ *  [0]   RTP v2: 0x80,
+ *  [1]   Playload type: 0x54 | marker bit: 0x80,
+ *  [2,3] Sequence number: 0x0007,
+ *  [4,7] Timestamp: 0x00000000 (to be set). */
+static const uint8_t sync_header[8] = {
+    0x80, 0xd4, 0x00, 0x07,
+    0x00, 0x00, 0x00, 0x00
+};
+
+/* Audio packet header (12x8):
+ *  [0]    RTP v2: 0x80,
+ *  [1]    Playload type: 0x60,
+ *  [2,3]  Sequence number: 0x0000 (to be set),
+ *  [4,7]  Timestamp: 0x00000000 (to be set),
+ *  [8,12] SSRC: 0x00000000 (to be set).*/
+static const uint8_t audio_header[12] = {
+    0x80, 0x60, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00
+};
+
+static inline void rtrimchar(char *str, char rc) {
+    char *sp;
+
+    sp = str + strlen(str) - 1;
+    while (sp >= str && *sp == rc) {
+        *sp = '\0';
+        sp--;
+    }
+}
+
 /**
  * Function to write bits into a buffer.
  * @param buffer Handle to the buffer. It will be incremented if new data requires it.
- * @param bit_pos A pointer to a position buffer to keep track the current write location (0 for MSB, 7 for LSB)
- * @param size A pointer to the byte size currently written. This allows the calling function to do simple buffer overflow checks
+ * @param index A pointer to a position buffer to keep track the current write location (0 for MSB, 7 for LSB)
+ * @param buffer_size A pointer to the byte size currently written. This allows the calling function to do simple buffer overflow checks
  * @param data The data to write
- * @param data_bit_len The number of bits from data to write
+ * @param data_bit_length The number of bits from data to write
  */
-static inline void bit_writer(uint8_t **buffer, uint8_t *bit_pos, int *size, uint8_t data, uint8_t data_bit_len) {
+static inline void bit_writer(uint8_t **buffer, uint8_t *index, int *buffer_size, uint8_t data, uint8_t data_bit_length) {
     int bits_left, bit_overflow;
     uint8_t bit_data;
 
-    if (!data_bit_len)
+    if (!data_bit_length)
         return;
 
-    /* If bit pos is zero, we will definately use at least one bit from the current byte so size increments. */
-    if (!*bit_pos)
-        *size += 1;
+    /* If bit pos is zero, we will definately use at least one bit from the current byte so buffer_size increments. */
+    if (!*index)
+        *buffer_size += 1;
 
     /* Calc the number of bits left in the current byte of buffer. */
-    bits_left = 7 - *bit_pos  + 1;
+    bits_left = 7 - *index  + 1;
     /* Calc the overflow of bits in relation to how much space we have left... */
-    bit_overflow = bits_left - data_bit_len;
+    bit_overflow = bits_left - data_bit_length;
     if (bit_overflow >= 0) {
         /* We can fit the new data in our current byte.
          * As we write from MSB->LSB we need to left shift by the overflow amount. */
         bit_data = data << bit_overflow;
-        if (*bit_pos)
+        if (*index)
             **buffer |= bit_data;
         else
             **buffer = bit_data;
         /* If our data fits exactly into the current byte, we need to increment our pointer. */
         if (0 == bit_overflow) {
-            /* Do not increment size as it will be incremented on next call as bit_pos is zero. */
+            /* Do not increment buffer_size as it will be incremented on next call as index is zero. */
             *buffer += 1;
-            *bit_pos = 0;
+            *index = 0;
         } else {
-            *bit_pos += data_bit_len;
+            *index += data_bit_length;
         }
     } else {
         /* bit_overflow is negative, there for we will need a new byte from our buffer
          * Firstly fill up what's left in the current byte. */
         bit_data = data >> -bit_overflow;
         **buffer |= bit_data;
-        /* Increment our buffer pointer and size counter. */
+        /* Increment our buffer pointer and buffer_size counter. */
         *buffer += 1;
-        *size += 1;
+        *buffer_size += 1;
         **buffer = data << (8 + bit_overflow);
-        *bit_pos = -bit_overflow;
+        *index = -bit_overflow;
     }
 }
 
@@ -200,33 +247,82 @@ static int rsa_encrypt(uint8_t *text, int len, uint8_t *res) {
 }
 
 static int aes_encrypt(pa_raop_client *c, uint8_t *data, int size) {
-    uint8_t *buf;
-    int i=0, j;
-
-    pa_assert(c);
+    uint8_t *buffer;
+    int i = 0, j;
 
     memcpy(c->aes_nv, c->aes_iv, AES_CHUNKSIZE);
-    while (i+AES_CHUNKSIZE <= size) {
-        buf = data + i;
-        for (j=0; j<AES_CHUNKSIZE; ++j)
-            buf[j] ^= c->aes_nv[j];
+    while (i + AES_CHUNKSIZE <= size) {
+        buffer = data + i;
+        for (j = 0; j < AES_CHUNKSIZE; ++j)
+            buffer[j] ^= c->aes_nv[j];
 
-        AES_encrypt(buf, buf, &c->aes);
-        memcpy(c->aes_nv, buf, AES_CHUNKSIZE);
+        AES_encrypt(buffer, buffer, &c->aes);
+        memcpy(c->aes_nv, buffer, AES_CHUNKSIZE);
         i += AES_CHUNKSIZE;
     }
 
     return i;
 }
 
-static inline void rtrimchar(char *str, char rc) {
-    char *sp;
+static int encode_and_encrypt(pa_raop_client *c, uint8_t *block, size_t size, pa_memchunk *encoded, size_t *read) {
+    const size_t offset = sizeof(audio_header);
+    uint32_t frames = 0;
+    size_t length, max;
+    uint8_t *b, *bp, bi;
+    uint8_t *r, *rp, *last;
+    int written = 0;
+    int rv = 1;
 
-    sp = str + strlen(str) - 1;
-    while (sp >= str && *sp == rc) {
-        *sp = '\0';
-        sp--;
+    written = *read = bi = 0;
+    /* 2 bytes per frame and per channels (stereo) */
+    frames = (int) (size / 4);
+    length = frames * 4;
+    /* Leave 16 bytes extra for the ALAC header which is about 55 bits. */
+    max = offset + 16 + length;
+    encoded->memblock = pa_memblock_new(c->core->mempool, max);
+    b = pa_memblock_acquire(encoded->memblock);
+
+    bp = b + offset;
+    /* Write the ALAC header bits. */
+    bit_writer(&bp, &bi, &written, 1, 3); /* Channels: 1 means stereo */
+    bit_writer(&bp, &bi, &written, 0, 4); /* Unknown */
+    bit_writer(&bp, &bi, &written, 0, 8); /* Unknown */
+    bit_writer(&bp, &bi, &written, 0, 4); /* Unknown */
+    bit_writer(&bp, &bi, &written, 1, 1); /* Hassize */
+    bit_writer(&bp, &bi, &written, 0, 2); /* Nb of uncompressed bytes */
+    bit_writer(&bp, &bi, &written, 1, 1); /* Is-not-compressed */
+
+    /* Size of data, integer, big endian. */
+    bit_writer(&bp, &bi, &written, (frames >> 24) & 0xff, 8);
+    bit_writer(&bp, &bi, &written, (frames >> 16) & 0xff, 8);
+    bit_writer(&bp, &bi, &written, (frames >> 8) & 0xff, 8);
+    bit_writer(&bp, &bi, &written, (frames) & 0xff, 8);
+
+    r = rp = block;
+    last = r + size - 4;
+
+    /* Write uncompressed audio samples. */
+    while (rp <= last) {
+        /* Manual byte swap for 2x16 bits frames (stereo) ! */
+        bit_writer(&bp, &bi, &written, *(rp + 1), 8);
+        bit_writer(&bp, &bi, &written, *(rp + 0), 8);
+        bit_writer(&bp, &bi, &written, *(rp + 3), 8);
+        bit_writer(&bp, &bi, &written, *(rp + 2), 8);
+        c->rtptime++;
+        *read += 4;
+        rp += 4;
     }
+
+    encoded->length = offset + written;
+
+    bp = b + offset;
+    /* Encrypt our data. */
+    aes_encrypt(c, bp, written);
+
+    /* We're done with the chunk. */
+    pa_memblock_release(encoded->memblock);
+
+    return rv;
 }
 
 static inline uint64_t timeval_to_ntp(struct timeval *tv) {
@@ -238,95 +334,6 @@ static inline uint64_t timeval_to_ntp(struct timeval *tv) {
     ntp |= (uint64_t) (tv->tv_sec + 0x83aa7e80) << 32;
 
     return ntp;
-}
-
-static int send_timing_packet(pa_raop_client *c, const uint8_t sent[8], uint64_t rci) {
-    uint8_t response[32];
-    struct timeval tv;
-    ssize_t written = 0;
-    uint64_t trs = 0;
-    int rv = 1;
-    int i;
-
-    /* RTP v2, seq_num = 0x0007, timestamp = 0. */
-    static uint8_t header[] = {
-        0x80, 0xd3, 0x00, 0x07,
-        0x00, 0x00, 0x00, 0x00
-    };
-
-    memcpy(response, header, sizeof(header));
-    /* Copying originate timestamp from the incoming request packet. */
-    for (i = 8; i < 16; i++)
-        response[i] = sent[i - 8];
-    /* Set the receive timestamp to reception time. */
-    response[16] = (uint8_t) ((rci & 0xff00000000000000) >> 56);
-    response[17] = (uint8_t) ((rci & 0x00ff000000000000) >> 48);
-    response[18] = (uint8_t) ((rci & 0x0000ff0000000000) >> 40);
-    response[19] = (uint8_t) ((rci & 0x000000ff00000000) >> 32);
-    response[20] = (uint8_t) ((rci & 0x00000000ff000000) >> 24);
-    response[21] = (uint8_t) ((rci & 0x0000000000ff0000) >> 16);
-    response[22] = (uint8_t) ((rci & 0x000000000000ff00) >> 8);
-    response[23] = (uint8_t)  (rci & 0x00000000000000ff);
-    /* Set the transmit timestamp to current time. */
-    trs = timeval_to_ntp(pa_rtclock_get(&tv));
-    response[24] = (uint8_t) ((trs & 0xff00000000000000) >> 56);
-    response[25] = (uint8_t) ((trs & 0x00ff000000000000) >> 48);
-    response[26] = (uint8_t) ((trs & 0x0000ff0000000000) >> 40);
-    response[27] = (uint8_t) ((trs & 0x000000ff00000000) >> 32);
-    response[28] = (uint8_t) ((trs & 0x00000000ff000000) >> 24);
-    response[29] = (uint8_t) ((trs & 0x0000000000ff0000) >> 16);
-    response[30] = (uint8_t) ((trs & 0x000000000000ff00) >> 8);
-    response[31] = (uint8_t)  (trs & 0x00000000000000ff);
-
-    written = pa_loop_write(c->timing_fd, response, sizeof(response), NULL);
-    if (written == sizeof(response))
-        rv = 0;
-
-    return rv;
-}
-
-static int send_sync_packet(pa_raop_client *c, uint32_t stamp) {
-    uint8_t response[20];
-    struct timeval tv;
-    ssize_t written = 0;
-    uint64_t trs = 0;
-    int rv = 1;
-
-    /* RTP v2, seq_num = 0x0007. */
-    static uint8_t header[] = {
-        0x80, 0xd4, 0x00, 0x07
-    };
-
-    memcpy(response, header, sizeof(header));
-    if (c->seq == 0)
-        response[0] = 0x10 | response[0];
-    /* Write given timestamp. */
-    response[4] = (uint8_t) ((stamp & 0xff000000) >> 24);
-    response[5] = (uint8_t) ((stamp & 0x00ff0000) >> 16);
-    response[6] = (uint8_t) ((stamp & 0x0000ff00) >> 8);
-    response[7] = (uint8_t)  (stamp & 0x000000ff);
-    /* Set the transmit timestamp to current time. */
-    trs = timeval_to_ntp(pa_rtclock_get(&tv));
-    response[8] =  (uint8_t) ((trs & 0xff00000000000000) >> 56);
-    response[9] =  (uint8_t) ((trs & 0x00ff000000000000) >> 48);
-    response[10] = (uint8_t) ((trs & 0x0000ff0000000000) >> 40);
-    response[11] = (uint8_t) ((trs & 0x000000ff00000000) >> 32);
-    response[12] = (uint8_t) ((trs & 0x00000000ff000000) >> 24);
-    response[13] = (uint8_t) ((trs & 0x0000000000ff0000) >> 16);
-    response[14] = (uint8_t) ((trs & 0x000000000000ff00) >> 8);
-    response[15] = (uint8_t)  (trs & 0x00000000000000ff);
-    /* Write next timestamp. */
-    stamp += FRAMES_PER_PACKET;
-    response[16] = (uint8_t) ((stamp & 0xff000000) >> 24);
-    response[17] = (uint8_t) ((stamp & 0x00ff0000) >> 16);
-    response[18] = (uint8_t) ((stamp & 0x0000ff00) >> 8);
-    response[19] = (uint8_t)  (stamp & 0x000000ff);
-
-    written = pa_loop_write(c->control_fd, response, sizeof(response), NULL);
-    if (written == sizeof(response))
-        rv = 0;
-
-    return rv;
 }
 
 static int bind_socket(pa_raop_client *c, int fd, uint16_t port) {
@@ -449,6 +456,81 @@ fail:
     return -1;
 }
 
+static int send_timing_packet(pa_raop_client *c, const uint32_t data[6], uint64_t received) {
+    uint32_t packet[8];
+    struct timeval tv;
+    ssize_t written = 0;
+    uint64_t trs = 0;
+    int rv = 1;
+
+    memcpy(packet, timming_header, sizeof(timming_header));
+    /* Copying originate timestamp from the incoming request packet. */
+    packet[2] = data[4];
+    packet[3] = data[5];
+    /* Set the receive timestamp to reception time. */
+    packet[4] = htonl(received >> 32);
+    packet[5] = htonl(received & 0xffffffff);
+    /* Set the transmit timestamp to current time. */
+    trs = timeval_to_ntp(pa_rtclock_get(&tv));
+    packet[6] = htonl(trs >> 32);
+    packet[7] = htonl(trs & 0xffffffff);
+
+    written = pa_loop_write(c->timing_fd, packet, sizeof(packet), NULL);
+    if (written == sizeof(packet))
+        rv = 0;
+
+    return rv;
+}
+
+static int send_sync_packet(pa_raop_client *c, uint32_t stamp) {
+    const uint32_t delay = 88200;
+    uint32_t packet[5];
+    struct timeval tv;
+    ssize_t written = 0;
+    uint64_t trs = 0;
+    int rv = 1;
+
+    memcpy(packet, sync_header, sizeof(sync_header));
+    if (c->first_packet == TRUE)
+        packet[0] |= 0x10;
+    stamp -= delay;
+    packet[1] = htonl(stamp);
+    /* Set the transmited timestamp to current time. */
+    trs = timeval_to_ntp(pa_rtclock_get(&tv));
+    packet[2] = htonl(trs >> 32);
+    packet[3] = htonl(trs & 0xffffffff);
+    stamp += delay;
+    packet[4] = htonl(stamp);
+
+    written = pa_loop_write(c->control_fd, packet, sizeof(packet), NULL);
+    if (written == sizeof(packet))
+        rv = 0;
+
+    return rv;
+}
+
+static int send_audio_packet(pa_raop_client *c, uint32_t *buffer, size_t size, ssize_t *written) {
+    ssize_t length = 0;
+    int rv = 1;
+
+    memcpy(buffer, audio_header, sizeof(audio_header));
+    if (c->first_packet == TRUE)
+        buffer[0] |= ((uint32_t) 0x80) << 8;
+    buffer[0] |= htonl((uint32_t) c->seq);
+    buffer[1] = htonl(c->rtptime);
+    buffer[2] = htonl(c->ssrc);
+
+    length = pa_loop_write(c->stream_fd, buffer, size, NULL);
+    if (length == ((ssize_t) size))
+        rv = 0;
+
+    if (written != NULL)
+        *written = length;
+    c->seq++;
+
+    return rv;
+}
+
 static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *headers, void *userdata) {
     pa_raop_client *c = userdata;
 
@@ -479,6 +561,8 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
             const char *ip;
             char *url;
             int i;
+
+            pa_log_debug("RAOP: OPTIONS");
 
             pa_rtsp_remove_header(c->rtsp, "Apple-Challenge");
 
@@ -539,6 +623,8 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
             char delimiters[] = ";";
             const char *token_state = NULL;
             uint32_t port = 0;
+
+            pa_log_debug("RAOP: SETUP");
 
             ajs = pa_xstrdup(pa_headerlist_gets(headers, "Audio-Jack-Status"));
             trs = pa_xstrdup(pa_headerlist_gets(headers, "Transport"));
@@ -616,16 +702,16 @@ static void rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist *he
 
             break;
 
-error:
-            if (c->stream_fd != -1) {
+        error:
+            if (c->stream_fd > 0) {
                 pa_close(c->stream_fd);
                 c->stream_fd = -1;
             }
-            if (c->control_fd != -1) {
+            if (c->control_fd > 0) {
                 pa_close(c->control_fd);
                 c->control_fd = -1;
             }
-            if (c->timing_fd != -1) {
+            if (c->timing_fd > 0) {
                 pa_close(c->timing_fd);
                 c->timing_fd = -1;
             }
@@ -643,16 +729,31 @@ error:
 
         case STATE_RECORD: {
             int32_t latency = 0;
+            uint32_t rand;
             char *alt;
 
+            pa_log_debug("RAOP: RECORD");
+
             alt = pa_xstrdup(pa_headerlist_gets(headers, "Audio-Latency"));
+            /* Generate a random synchronization source identifier from this session. */
+            pa_random(&rand, sizeof(rand));
+            c->ssrc = rand;
 
             if (alt)
                 pa_atoi(alt, &latency);
 
+            c->first_packet = TRUE;
+            c->sync_count = 0;
+
             c->record_callback(c->setup_userdata);
 
             pa_xfree(alt);
+            break;
+        }
+
+        case STATE_SET_PARAMETER: {
+            pa_log_debug("RAOP: SET_PARAMETER");
+
             break;
         }
 
@@ -665,23 +766,7 @@ error:
         case STATE_TEARDOWN: {
             pa_log_debug("RAOP: TEARDOWN");
 
-            break;
-        }
-
-        case STATE_SET_PARAMETER: {
-            pa_log_debug("RAOP: SET_PARAMETER");
-
-            break;
-        }
-
-        case STATE_DISCONNECTED: {
-            pa_assert(c->disconnected_callback);
-            pa_assert(c->rtsp);
-
-            pa_log_debug("RTSP control channel closed");
-
-            pa_rtsp_client_free(c->rtsp);
-            c->rtsp = NULL;
+            pa_rtsp_disconnect(c->rtsp);
 
             if (c->stream_fd > 0) {
                 pa_close(c->stream_fd);
@@ -696,7 +781,38 @@ error:
                 c->timing_fd = -1;
             }
 
+            pa_log_debug("RTSP control channel closed");
+
+            pa_rtsp_client_free(c->rtsp);
             pa_xfree(c->sid);
+            c->rtsp = NULL;
+            c->sid = NULL;
+
+            break;
+        }
+
+        case STATE_DISCONNECTED: {
+            pa_assert(c->disconnected_callback);
+            pa_assert(c->rtsp);
+
+            if (c->stream_fd > 0) {
+                pa_close(c->stream_fd);
+                c->stream_fd = -1;
+            }
+            if (c->control_fd > 0) {
+                pa_close(c->control_fd);
+                c->control_fd = -1;
+            }
+            if (c->timing_fd > 0) {
+                pa_close(c->timing_fd);
+                c->timing_fd = -1;
+            }
+
+            pa_log_debug("RTSP control channel closed");
+
+            pa_rtsp_client_free(c->rtsp);
+            pa_xfree(c->sid);
+            c->rtsp = NULL;
             c->sid = NULL;
 
             c->disconnected_callback(c->disconnected_userdata);
@@ -706,12 +822,13 @@ error:
     }
 }
 
-pa_raop_client* pa_raop_client_new(pa_core *core, const char *host) {
+pa_raop_client* pa_raop_client_new(pa_core *core, const char *host, pa_sample_spec spec) {
     pa_raop_client *c = NULL;
     pa_parsed_address a;
 
     pa_assert(core);
     pa_assert(host);
+    pa_assert(spec.rate > 0);
 
     if (pa_parse_address(host, &a) < 0)
         return NULL;
@@ -733,6 +850,11 @@ pa_raop_client* pa_raop_client_new(pa_core *core, const char *host) {
             c->port = a.port;
         else
             c->port = DEFAULT_RAOP_PORT;
+
+        c->first_packet = TRUE;
+        /* Packet sync interval should be around 1s. */
+        c->sync_interval = spec.rate / FRAMES_PER_PACKET;
+        c->sync_count = 0;
     }
 
     return c;
@@ -792,8 +914,10 @@ int pa_raop_client_flush(pa_raop_client *c) {
 
     pa_assert(c);
 
-    if (c->rtsp != NULL)
+    if (c->rtsp != NULL) {
         rv = pa_rtsp_flush(c->rtsp, c->seq, c->rtptime);
+        c->sync_count = -1;
+    }
 
     return rv;
 }
@@ -822,36 +946,30 @@ int pa_raop_client_can_stream(pa_raop_client *c) {
     return rv;
 }
 
-int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size) {
-    const uint8_t * snt = NULL;
+int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[], ssize_t size) {
+    const uint32_t * data = NULL;
+    uint8_t playload = 0;
     struct timeval tv;
     uint64_t rci = 0;
-    uint8_t plt = 0x00;
     int rv = 0;
 
     pa_assert(c);
     pa_assert(packet);
 
     /* Timing packets are 32 bytes long: 1 x 8 RTP header (no ssrc) + 3 x 8 NTP timestamps. */
-    if (packet_size != 32)
+    if (size != 32 || packet[0] != 0x80)
     {
-        pa_log_debug("Invalid timing packet: size mismatch.");
+        pa_log_debug("Received an invalid timing packet.");
         return 1;
     }
 
-    if (packet[0] != 0x80) {
-        pa_log_debug("Invalid timing packet: version or control mismatch (0x%02x).", packet[0]);
-        return 1;
-    }
-
-    snt = packet + 24;
+    data = (uint32_t *) (packet + sizeof(timming_header));
     rci = timeval_to_ntp(pa_rtclock_get(&tv));
     /* The market bit is always set (see rfc3550 for packet structure) ! */
-    plt = packet[1] ^ 0x80;
-
-    switch (plt) {
+    playload = packet[1] ^ 0x80;
+    switch (playload) {
         case PAYLOAD_TIMING_REQUEST:
-            rv = send_timing_packet(c, snt, rci);
+            rv = send_timing_packet(c, data, rci);
             break;
         case PAYLOAD_TIMING_RESPONSE:
         default:
@@ -862,27 +980,22 @@ int pa_raop_client_handle_timing_packet(pa_raop_client *c, const uint8_t packet[
     return rv;
 }
 
-int pa_raop_client_handle_control_packet(pa_raop_client *c, const uint8_t packet[], ssize_t packet_size) {
-    uint8_t plt;
+int pa_raop_client_handle_control_packet(pa_raop_client *c, const uint8_t packet[], ssize_t size) {
+    uint8_t playload = 0;
     int rv = 0;
 
     pa_assert(c);
     pa_assert(packet);
 
-    if (packet_size != 20)
+    if (size != 20 || packet[0] != 0x80)
     {
-        pa_log_debug("Invalid control packet: size mismatch.");
+        pa_log_debug("Received an invalid control packet.");
         return 1;
     }
 
-    if (packet[0] != 0x80) {
-        pa_log_debug("Invalid timing packet: version or control mismatch (0x%02x).", packet[0]);
-        return 1;
-    }
-
-    plt = packet[1] ^ 0x80;
-
-    switch (plt) {
+    /* The market bit is always set (see rfc3550 for packet structure) ! */
+    playload = packet[1] ^ 0x80;
+    switch (playload) {
         case PAYLOAD_RETRANSMIT_REQUEST:
             /* Packet retransmission not implemented yet... */
             /* rv = ... */
@@ -896,95 +1009,67 @@ int pa_raop_client_handle_control_packet(pa_raop_client *c, const uint8_t packet
     return rv;
 }
 
-int pa_raop_client_synchronize_timestamps(pa_raop_client *c, uint32_t stamp) {
+int pa_raop_client_get_blocks_size(pa_raop_client *c, size_t *size) {
     int rv = 0;
 
     pa_assert(c);
+    pa_assert(size);
 
-    if (c->control_fd > 0)
-        rv = send_sync_packet(c, stamp);
+    *size = FRAMES_PER_PACKET;
 
     return rv;
 }
 
-int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded) {
-    uint16_t len;
-    size_t bufmax;
-    uint8_t *bp, bpos;
-    uint8_t *ibp, *maxibp;
-    int size;
-    uint8_t *b, *p;
-    uint32_t bsize;
-    size_t length;
-    static uint8_t header[] = {
-        0x24, 0x00, 0x00, 0x00,
-        0xF0, 0xFF, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00
-    };
-    int header_size = sizeof(header);
+int pa_raop_client_encode_block(pa_raop_client *c, pa_memchunk *raw, pa_memchunk *encoded) {
+    uint8_t *block = NULL;
+    size_t read = 0;
     int rv = 0;
 
     pa_assert(c);
-    pa_assert(c->stream_fd > 0);
     pa_assert(raw);
     pa_assert(raw->memblock);
     pa_assert(raw->length > 0);
     pa_assert(encoded);
 
-    /* We have to send 4 byte chunks */
-    bsize = (int)(raw->length / 4);
-    length = bsize * 4;
-
-    /* Leave 16 bytes extra to allow for the ALAC header which is about 55 bits. */
-    bufmax = length + header_size + 16;
     pa_memchunk_reset(encoded);
-    encoded->memblock = pa_memblock_new(c->core->mempool, bufmax);
-    b = pa_memblock_acquire(encoded->memblock);
-    memcpy(b, header, header_size);
-
-    /* Now write the actual samples. */
-    bp = b + header_size;
-    size = bpos = 0;
-    bit_writer(&bp,&bpos,&size,1,3); /* channel=1, stereo */
-    bit_writer(&bp,&bpos,&size,0,4); /* Unknown */
-    bit_writer(&bp,&bpos,&size,0,8); /* Unknown */
-    bit_writer(&bp,&bpos,&size,0,4); /* Unknown */
-    bit_writer(&bp,&bpos,&size,1,1); /* Hassize */
-    bit_writer(&bp,&bpos,&size,0,2); /* Unused */
-    bit_writer(&bp,&bpos,&size,1,1); /* Is-not-compressed */
-
-    /* Size of data, integer, big endian. */
-    bit_writer(&bp,&bpos,&size,(bsize>>24)&0xff,8);
-    bit_writer(&bp,&bpos,&size,(bsize>>16)&0xff,8);
-    bit_writer(&bp,&bpos,&size,(bsize>>8)&0xff,8);
-    bit_writer(&bp,&bpos,&size,(bsize)&0xff,8);
-
-    ibp = p = pa_memblock_acquire(raw->memblock);
-    maxibp = p + raw->length - 4;
-    while (ibp <= maxibp) {
-        /* Byte swap stereo data. */
-        bit_writer(&bp,&bpos,&size,*(ibp+1),8);
-        bit_writer(&bp,&bpos,&size,*(ibp+0),8);
-        bit_writer(&bp,&bpos,&size,*(ibp+3),8);
-        bit_writer(&bp,&bpos,&size,*(ibp+2),8);
-        ibp += 4;
-        raw->index += 4;
-        raw->length -= 4;
+    block = pa_memblock_acquire(raw->memblock);
+    if (block != NULL && encoded != NULL) {
+        rv = encode_and_encrypt(c, block, raw->length, encoded, &read);
+        raw->index += read;
+        raw->length -= read;
     }
+
     pa_memblock_release(raw->memblock);
-    encoded->length = header_size + size;
+    return rv;
+}
 
-    /* Store the length (endian swapped: make this better). */
-    len = size + header_size - 4;
-    *(b + 2) = len >> 8;
-    *(b + 3) = len & 0xff;
+int pa_raop_client_send_audio_packet(pa_raop_client *c, pa_memchunk *block, ssize_t *written) {
+    uint32_t *buf = NULL;
+    ssize_t length = 0;
+    int rv = 0;
 
-    /* Encrypt our data. */
-    aes_encrypt(c, (b + header_size), size);
+    pa_assert(c);
+    pa_assert(block);
 
-    /* We're done with the chunk. */
-    pa_memblock_release(encoded->memblock);
+    /* Sync RTP & NTP timestamp if required. */
+    if (c->first_packet == TRUE || c->sync_count >= c->sync_interval) {
+        send_sync_packet(c, c->rtptime);
+        c->sync_count = 0;
+    } else {
+        c->sync_count++;
+    }
+
+    buf = (uint32_t *) pa_memblock_acquire(block->memblock);
+    if (buf != NULL && block->length > 0)
+        rv = send_audio_packet(c, buf + block->index, block->length, &length);
+    pa_memblock_release(block->memblock);
+    block->index += length;
+    block->length -= length;
+    if (written != NULL)
+        *written = length;
+
+    if (c->first_packet == TRUE)
+        c->first_packet = FALSE;
 
     return rv;
 }
