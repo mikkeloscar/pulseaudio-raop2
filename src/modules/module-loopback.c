@@ -138,28 +138,34 @@ static void teardown(struct userdata *u) {
     pa_assert(u);
     pa_assert_ctl_context();
 
-    if (u->asyncmsgq)
-        pa_asyncmsgq_flush(u->asyncmsgq, 0);
-
     u->adjust_time = 0;
     enable_adjust_timer(u, false);
 
-    if (u->sink_input)
-        pa_sink_input_unlink(u->sink_input);
-
-    if (u->source_output)
-        pa_source_output_unlink(u->source_output);
-
-    if (u->sink_input) {
-        u->sink_input->parent.process_msg = pa_sink_input_process_msg;
-        pa_sink_input_unref(u->sink_input);
-        u->sink_input = NULL;
-    }
+    /* Handling the asyncmsgq between the source output and the sink input
+     * requires some care. When the source output is unlinked, nothing needs
+     * to be done for the asyncmsgq, because the source output is the sending
+     * end. But when the sink input is unlinked, we should ensure that the
+     * asyncmsgq is emptied, because the messages in the queue hold references
+     * to the sink input. Also, we need to ensure that new messages won't be
+     * written to the queue after we have emptied it.
+     *
+     * Emptying the queue can be done in the state_changed() callback of the
+     * sink input, when the new state is "unlinked".
+     *
+     * Preventing new messages from being written to the queue can be achieved
+     * by unlinking the source output before unlinking the sink input. There
+     * are no other writers for that queue, so this is sufficient. */
 
     if (u->source_output) {
-        u->source_output->parent.process_msg = pa_source_output_process_msg;
+        pa_source_output_unlink(u->source_output);
         pa_source_output_unref(u->source_output);
         u->source_output = NULL;
+    }
+
+    if (u->sink_input) {
+        pa_sink_input_unlink(u->sink_input);
+        pa_sink_input_unref(u->sink_input);
+        u->sink_input = NULL;
     }
 }
 
@@ -379,12 +385,15 @@ static void source_output_kill_cb(pa_source_output *o) {
 }
 
 /* Called from main thread */
-static pa_bool_t source_output_may_move_to_cb(pa_source_output *o, pa_source *dest) {
+static bool source_output_may_move_to_cb(pa_source_output *o, pa_source *dest) {
     struct userdata *u;
 
     pa_source_output_assert_ref(o);
     pa_assert_ctl_context();
     pa_assert_se(u = o->userdata);
+
+    if (!u->sink_input || !u->sink_input->sink)
+        return true;
 
     return dest != u->sink_input->sink->monitor_source;
 }
@@ -643,6 +652,17 @@ static void sink_input_kill_cb(pa_sink_input *i) {
     pa_module_unload_request(u->module, TRUE);
 }
 
+/* Called from the output thread context */
+static void sink_input_state_change_cb(pa_sink_input *i, pa_sink_input_state_t state) {
+    struct userdata *u;
+
+    pa_sink_input_assert_ref(i);
+    pa_assert_se(u = i->userdata);
+
+    if (state == PA_SINK_INPUT_UNLINKED)
+        pa_asyncmsgq_flush(u->asyncmsgq, false);
+}
+
 /* Called from main thread */
 static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
     struct userdata *u;
@@ -667,15 +687,15 @@ static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
 }
 
 /* Called from main thread */
-static pa_bool_t sink_input_may_move_to_cb(pa_sink_input *i, pa_sink *dest) {
+static bool sink_input_may_move_to_cb(pa_sink_input *i, pa_sink *dest) {
     struct userdata *u;
 
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert_se(u = i->userdata);
 
-    if (!u->source_output->source->monitor_of)
-        return TRUE;
+    if (!u->source_output || !u->source_output->source)
+        return true;
 
     return dest != u->source_output->source->monitor_of;
 }
@@ -845,10 +865,16 @@ int pa__init(pa_module *m) {
     if (!u->sink_input)
         goto fail;
 
+    /* If format, rate or channels were originally unset, they are set now
+     * after the pa_sink_input_new() call. */
+    ss = u->sink_input->sample_spec;
+    map = u->sink_input->channel_map;
+
     u->sink_input->parent.process_msg = sink_input_process_msg_cb;
     u->sink_input->pop = sink_input_pop_cb;
     u->sink_input->process_rewind = sink_input_process_rewind_cb;
     u->sink_input->kill = sink_input_kill_cb;
+    u->sink_input->state_change = sink_input_state_change_cb;
     u->sink_input->attach = sink_input_attach_cb;
     u->sink_input->detach = sink_input_detach_cb;
     u->sink_input->update_max_rewind = sink_input_update_max_rewind_cb;
@@ -881,15 +907,6 @@ int pa__init(pa_module *m) {
 
     if (!remix)
         source_output_data.flags |= PA_SOURCE_OUTPUT_NO_REMIX;
-
-    if (!format_set)
-        source_output_data.flags |= PA_SOURCE_OUTPUT_FIX_FORMAT;
-
-    if (!rate_set)
-        source_output_data.flags |= PA_SOURCE_OUTPUT_FIX_RATE;
-
-    if (!channels_set)
-        source_output_data.flags |= PA_SOURCE_OUTPUT_FIX_CHANNELS;
 
     source_dont_move = FALSE;
     if (pa_modargs_get_value_boolean(ma, "source_dont_move", &source_dont_move) < 0) {

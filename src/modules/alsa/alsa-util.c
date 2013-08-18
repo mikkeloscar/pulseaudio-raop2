@@ -1141,10 +1141,11 @@ snd_pcm_sframes_t pa_alsa_safe_avail(snd_pcm_t *pcm, size_t hwbuf_size, const pa
     return n;
 }
 
-int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_sframes_t *delay, size_t hwbuf_size, const pa_sample_spec *ss, pa_bool_t capture) {
+int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_status_t *status, snd_pcm_sframes_t *delay, size_t hwbuf_size, const pa_sample_spec *ss,
+                       pa_bool_t capture) {
     ssize_t k;
     size_t abs_k;
-    int r;
+    int err;
     snd_pcm_sframes_t avail = 0;
 
     pa_assert(pcm);
@@ -1154,10 +1155,16 @@ int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_sframes_t *delay, size_t hwbuf_si
 
     /* Some ALSA driver expose weird bugs, let's inform the user about
      * what is going on. We're going to get both the avail and delay values so
-     * that we can compare and check them for capture */
+     * that we can compare and check them for capture.
+     * This is done with snd_pcm_status() which provides
+     * avail, delay and timestamp values in a single kernel call to improve
+     * timer-based scheduling */
 
-    if ((r = snd_pcm_avail_delay(pcm, &avail, delay)) < 0)
-        return r;
+    if ((err = snd_pcm_status(pcm, status)) < 0)
+        return err;
+
+    avail = snd_pcm_status_get_avail(status);
+    *delay = snd_pcm_status_get_delay(status);
 
     k = (ssize_t) *delay * (ssize_t) pa_frame_size(ss);
 
@@ -1319,7 +1326,7 @@ char *pa_alsa_get_reserve_name(const char *device) {
     return pa_sprintf_malloc("Audio%i", i);
 }
 
-unsigned int *pa_alsa_get_supported_rates(snd_pcm_t *pcm) {
+unsigned int *pa_alsa_get_supported_rates(snd_pcm_t *pcm, unsigned int fallback_rate) {
     static unsigned int all_rates[] = { 8000, 11025, 12000,
                                         16000, 22050, 24000,
                                         32000, 44100, 48000,
@@ -1345,17 +1352,27 @@ unsigned int *pa_alsa_get_supported_rates(snd_pcm_t *pcm) {
         }
     }
 
-    if (n == 0)
-        return NULL;
+    if (n > 0) {
+        rates = pa_xnew(unsigned int, n + 1);
 
-    rates = pa_xnew(unsigned int, n + 1);
+        for (i = 0, j = 0; i < PA_ELEMENTSOF(all_rates); i++) {
+            if (supported[i])
+                rates[j++] = all_rates[i];
+        }
 
-    for (i = 0, j = 0; i < PA_ELEMENTSOF(all_rates); i++) {
-        if (supported[i])
-            rates[j++] = all_rates[i];
+        rates[j] = 0;
+    } else {
+        rates = pa_xnew(unsigned int, 2);
+
+        rates[0] = fallback_rate;
+        if ((ret = snd_pcm_hw_params_set_rate_near(pcm, hwparams, &rates[0], NULL)) < 0) {
+            pa_log_debug("snd_pcm_hw_params_set_rate_near() failed: %s", pa_alsa_strerror(ret));
+            pa_xfree(rates);
+            return NULL;
+        }
+
+        rates[1] = 0;
     }
-
-    rates[j] = 0;
 
     return rates;
 }
@@ -1444,6 +1461,20 @@ snd_hctl_elem_t* pa_alsa_find_jack(snd_hctl_t *hctl, const char* jack_name)
 
     return snd_hctl_find_elem(hctl, id);
 }
+
+snd_hctl_elem_t* pa_alsa_find_eld_ctl(snd_hctl_t *hctl, int device) {
+    snd_ctl_elem_id_t *id;
+
+    /* See if we can find the ELD control */
+    snd_ctl_elem_id_alloca(&id);
+    snd_ctl_elem_id_clear(id);
+    snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_PCM);
+    snd_ctl_elem_id_set_name(id, "ELD");
+    snd_ctl_elem_id_set_device(id, device);
+
+    return snd_hctl_find_elem(hctl, id);
+}
+
 
 static int prepare_mixer(snd_mixer_t *mixer, const char *dev, snd_hctl_t **hctl) {
     int err;
@@ -1556,4 +1587,58 @@ snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device, snd_h
 
     snd_mixer_close(m);
     return NULL;
+}
+
+int pa_alsa_get_hdmi_eld(snd_hctl_t *hctl, int device, pa_hdmi_eld *eld) {
+
+    /* The ELD format is specific to HDA Intel sound cards and defined in the
+       HDA specification: http://www.intel.com/content/www/us/en/standards/high-definition-audio-specification.html */
+    int err;
+    snd_hctl_elem_t *elem;
+    snd_ctl_elem_info_t *info;
+    snd_ctl_elem_value_t *value;
+    uint8_t *elddata;
+    unsigned int eldsize, mnl;
+
+    pa_assert(eld != NULL);
+
+    /* See if we can find the ELD control */
+    elem = pa_alsa_find_eld_ctl(hctl, device);
+    if (elem == NULL) {
+        pa_log_debug("No ELD info control found (for device=%d)", device);
+        return -1;
+    }
+
+    /* Does it have any contents? */
+    snd_ctl_elem_info_alloca(&info);
+    snd_ctl_elem_value_alloca(&value);
+    if ((err = snd_hctl_elem_info(elem, info)) < 0 ||
+       (err = snd_hctl_elem_read(elem, value)) < 0) {
+        pa_log_warn("Accessing ELD control failed with error %s", snd_strerror(err));
+        return -1;
+    }
+
+    eldsize = snd_ctl_elem_info_get_count(info);
+    elddata = (unsigned char *) snd_ctl_elem_value_get_bytes(value);
+    if (elddata == NULL || eldsize == 0) {
+        pa_log_debug("ELD info empty (for device=%d)", device);
+        return -1;
+    }
+    if (eldsize < 20 || eldsize > 256) {
+        pa_log_debug("ELD info has wrong size (for device=%d)", device);
+        return -1;
+    }
+
+    /* Try to fetch monitor name */
+    mnl = elddata[4] & 0x1f;
+    if (mnl == 0 || mnl > 16 || 20 + mnl > eldsize) {
+        pa_log_debug("No monitor name in ELD info (for device=%d)", device);
+        mnl = 0;
+    }
+    memcpy(eld->monitor_name, &elddata[20], mnl);
+    eld->monitor_name[mnl] = '\0';
+    if (mnl)
+        pa_log_debug("Monitor name in ELD info is '%s' (for device=%d)", eld->monitor_name, device);
+
+    return 0;
 }

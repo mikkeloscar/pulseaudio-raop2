@@ -40,19 +40,15 @@ AC_SUBST(PA_MINOR, pa_minor)
 AC_SUBST(PA_MAJORMINOR, pa_major.pa_minor)
 
 AC_SUBST(PA_API_VERSION, 12)
-AC_SUBST(PA_PROTOCOL_VERSION, 27)
+AC_SUBST(PA_PROTOCOL_VERSION, 28)
 
 # The stable ABI for client applications, for the version info x:y:z
 # always will hold y=z
-AC_SUBST(LIBPULSE_VERSION_INFO, [14:2:14])
+AC_SUBST(LIBPULSE_VERSION_INFO, [16:2:16])
 
 # A simplified, synchronous, ABI-stable interface for client
 # applications, for the version info x:y:z always will hold y=z
-AC_SUBST(LIBPULSE_SIMPLE_VERSION_INFO, [0:3:0])
-
-# The ABI-stable network browsing interface for client applications,
-# for the version info x:y:z always will hold y=z
-AC_SUBST(LIBPULSE_BROWSE_VERSION_INFO, [1:1:1])
+AC_SUBST(LIBPULSE_SIMPLE_VERSION_INFO, [0:4:0])
 
 # The ABI-stable GLib adapter for client applications, for the version
 # info x:y:z always will hold y=z
@@ -165,7 +161,7 @@ esac
 #### Compiler flags ####
 
 AX_APPEND_COMPILE_FLAGS(
-    [-Wall -W -Wextra -pipe -Wno-long-long -Wvla -Wno-overlength-strings -Wunsafe-loop-optimizations -Wundef -Wformat=2 -Wlogical-op -Wsign-compare -Wformat-security -Wmissing-include-dirs -Wformat-nonliteral -Wold-style-definition -Wpointer-arith -Winit-self -Wdeclaration-after-statement -Wfloat-equal -Wmissing-prototypes -Wstrict-prototypes -Wredundant-decls -Wmissing-declarations -Wmissing-noreturn -Wshadow -Wendif-labels -Wcast-align -Wstrict-aliasing -Wwrite-strings -Wno-unused-parameter -ffast-math -Wp,-D_FORTIFY_SOURCE=2 -fno-common -fdiagnostics-show-option],
+    [-Wall -W -Wextra -pipe -Wno-long-long -Wno-overlength-strings -Wunsafe-loop-optimizations -Wundef -Wformat=2 -Wlogical-op -Wsign-compare -Wformat-security -Wmissing-include-dirs -Wformat-nonliteral -Wold-style-definition -Wpointer-arith -Winit-self -Wdeclaration-after-statement -Wfloat-equal -Wmissing-prototypes -Wstrict-prototypes -Wredundant-decls -Wmissing-declarations -Wmissing-noreturn -Wshadow -Wendif-labels -Wcast-align -Wstrict-aliasing -Wwrite-strings -Wno-unused-parameter -ffast-math -Wp,-D_FORTIFY_SOURCE=2 -fno-common -fdiagnostics-show-option],
     [], [-pedantic -Werror])
 
 # Only enable fastpath asserts when doing a debug build, e.g. from bootstrap.sh.
@@ -317,17 +313,40 @@ case $host in
   ;;
 esac
 
+#### NEON optimisations ####
+AC_ARG_ENABLE([neon-opt],
+    AS_HELP_STRING([--enable-neon-opt], [Enable NEON optimisations on ARM CPUs that support it]))
+
+AS_IF([test "x$enable_neon_opt" != "xno"],
+    [save_CFLAGS="$CFLAGS"; CFLAGS="$CFLAGS -mfpu=neon"
+     AC_COMPILE_IFELSE(
+        AC_LANG_PROGRAM([], []),
+        [
+         HAVE_NEON=1
+         NEON_CFLAGS="-mfpu=neon"
+        ],
+        [
+         HAVE_NEON=0
+         NEON_CFLAGS=
+        ])
+     CFLAGS="$save_CFLAGS"
+    ],
+    [HAVE_NEON=0])
+
+AS_IF([test "x$enable_neon_opt" = "xyes" && test "x$HAVE_NEON" = "x0"],
+      [AC_MSG_ERROR([*** Compiler does not support -mfpu=neon])])
+
+AC_SUBST(HAVE_NEON)
+AC_SUBST(NEON_CFLAGS)
+AM_CONDITIONAL([HAVE_NEON], [test "x$HAVE_NEON" = x1])
+AS_IF([test "x$HAVE_NEON" = "x1"], AC_DEFINE([HAVE_NEON], 1, [Have NEON support?]))
+
 
 #### libtool stuff ####
 
-LT_PREREQ(2.2)
+LT_PREREQ(2.4)
 LT_INIT([dlopen win32-dll disable-static])
 
-dnl Unfortunately, even up to libtool 2.2.6a there is no way to know
-dnl exactly which version of libltdl is present in the system, so we
-dnl just assume that it's a working version as long as we have the
-dnl library and the header files.
-dnl
 dnl As an extra safety device, check for lt_dladvise_init() which is
 dnl only implemented in libtool 2.x, and refine as we go if we have
 dnl refined requirements.
@@ -345,7 +364,7 @@ AC_CHECK_HEADER([ltdl.h],
     [LIBLTDL=])
 
 AS_IF([test "x$LIBLTDL" = "x"],
-    [AC_MSG_ERROR([Unable to find libltdl version 2. Makes sure you have libtool 2.2 or later installed.])])
+    [AC_MSG_ERROR([Unable to find libltdl version 2. Makes sure you have libtool 2.4 or later installed.])])
 AC_SUBST([LIBLTDL])
 
 
@@ -477,7 +496,10 @@ if test "x$os_is_darwin" = "x1" ; then
     # How do I check a framework "library" - AC_CHECK_LIB prob. won't work??, just assign LIBS & hope
     AC_CHECK_HEADER([/Developer/Headers/FlatCarbon/CoreServices.h],
         [LIBS="$LIBS -framework CoreServices"],
-        [AC_MSG_ERROR([CoreServices.h header file not found])]
+        [AC_CHECK_HEADERS([/System/Library/Frameworks/CoreServices.framework/Headers/CoreServices.h],
+            [LIBS="$LIBS -framework CoreServices"],
+            [AC_MSG_ERROR([CoreServices.h header file not found])]
+        )]
     )
 
     AC_MSG_RESULT([ok])
@@ -602,7 +624,8 @@ AM_CONDITIONAL([HAVE_TESTS], [test "x$HAVE_LIBCHECK" = x1])
 
 #### json parsing ####
 
-PKG_CHECK_MODULES(LIBJSON, [ json >= 0.9 ])
+PKG_CHECK_MODULES(LIBJSON, [ json-c >= 0.11 ], [],
+		  [PKG_CHECK_MODULES(LIBJSON, [ json >= 0.9 ])])
 AC_SUBST(LIBJSON_CFLAGS)
 AC_SUBST(LIBJSON_LIBS)
 
@@ -748,11 +771,11 @@ AC_ARG_ENABLE([alsa],
     AS_HELP_STRING([--disable-alsa],[Disable optional ALSA support]))
 
 AS_IF([test "x$enable_alsa" != "xno"],
-    [PKG_CHECK_MODULES(ASOUNDLIB, [ alsa >= 1.0.19 ], HAVE_ALSA=1, HAVE_ALSA=0)],
+    [PKG_CHECK_MODULES(ASOUNDLIB, [ alsa >= 1.0.24 ], HAVE_ALSA=1, HAVE_ALSA=0)],
     HAVE_ALSA=0)
 
 AS_IF([test "x$enable_alsa" = "xyes" && test "x$HAVE_ALSA" = "x0"],
-    [AC_MSG_ERROR([*** Needed alsa >= 1.0.19 support not found])])
+    [AC_MSG_ERROR([*** Needed alsa >= 1.0.24 support not found])])
 
 AC_SUBST(ASOUNDLIB_CFLAGS)
 AC_SUBST(ASOUNDLIB_LIBS)
@@ -816,22 +839,22 @@ AC_SUBST(HAVE_GLIB20)
 AM_CONDITIONAL([HAVE_GLIB20], [test "x$HAVE_GLIB20" = x1])
 AS_IF([test "x$HAVE_GLIB20" = "x1"], AC_DEFINE([HAVE_GLIB], 1, [Have GLIB?]))
 
-#### GTK2 support (optional) ####
+#### GTK3 support (optional) ####
 
-AC_ARG_ENABLE([gtk2],
-    AS_HELP_STRING([--disable-gtk2],[Disable optional Gtk+ 2 support]))
+AC_ARG_ENABLE([gtk3],
+    AS_HELP_STRING([--disable-gtk3],[Disable optional Gtk+ 3 support]))
 
-AS_IF([test "x$enable_gtk2" != "xno"],
-    [PKG_CHECK_MODULES(GTK20, [ gtk+-2.0 >= 2.4.0 ], HAVE_GTK20=1, HAVE_GTK20=0)],
-    HAVE_GTK20=0)
+AS_IF([test "x$enable_gtk3" != "xno"],
+    [PKG_CHECK_MODULES(GTK30, [ gtk+-3.0 ], HAVE_GTK30=1, HAVE_GTK30=0)],
+    HAVE_GTK30=0)
 
-AS_IF([test "x$enable_gtk2" = "xyes" && test "x$HAVE_GTK20" = "x0"],
-    [AC_MSG_ERROR([*** Gtk+ 2 support not found])])
+AS_IF([test "x$enable_gtk3" = "xyes" && test "x$HAVE_GTK30" = "x0"],
+    [AC_MSG_ERROR([*** Gtk+ 3 support not found])])
 
-AC_SUBST(GTK20_CFLAGS)
-AC_SUBST(GTK20_LIBS)
-AM_CONDITIONAL([HAVE_GTK20], [test "x$HAVE_GTK20" = x1])
-AS_IF([test "x$HAVE_GTK20" = "x1"], AC_DEFINE([HAVE_GTK], 1, [Have GTK?]))
+AC_SUBST(GTK30_CFLAGS)
+AC_SUBST(GTK30_LIBS)
+AM_CONDITIONAL([HAVE_GTK30], [test "x$HAVE_GTK30" = x1])
+AS_IF([test "x$HAVE_GTK30" = "x1"], AC_DEFINE([HAVE_GTK], 1, [Have GTK?]))
 
 #### GConf support (optional) ####
 
@@ -945,11 +968,11 @@ AC_ARG_ENABLE([dbus],
     AS_HELP_STRING([--disable-dbus],[Disable optional D-Bus support]))
 
 AS_IF([test "x$enable_dbus" != "xno"],
-    [PKG_CHECK_MODULES(DBUS, [ dbus-1 >= 1.3.0 ], HAVE_DBUS=1, HAVE_DBUS=0)],
+    [PKG_CHECK_MODULES(DBUS, [ dbus-1 >= 1.4.12 ], HAVE_DBUS=1, HAVE_DBUS=0)],
     HAVE_DBUS=0)
 
 AS_IF([test "x$enable_dbus" = "xyes" && test "x$HAVE_DBUS" = "x0"],
-    [AC_MSG_ERROR([*** D-Bus (1.3.0+) support not found])])
+    [AC_MSG_ERROR([*** D-Bus not available or too old version])])
 
 AS_IF([test "x$HAVE_DBUS" = "x1"],
     [
@@ -978,15 +1001,16 @@ AC_ARG_ENABLE([bluez],
     AS_HELP_STRING([--disable-bluez],[Disable optional BlueZ support]))
 
 AS_IF([test "x$enable_bluez" != "xno"],
-    [PKG_CHECK_MODULES(BLUEZ, [ bluez >= 3.0 ], HAVE_BLUEZ=1, HAVE_BLUEZ=0)],
+    [PKG_CHECK_MODULES(BLUEZ, [ bluez >= 4.99 ], HAVE_BLUEZ=1, HAVE_BLUEZ=0)],
     HAVE_BLUEZ=0)
 AS_IF([test "x$enable_bluez" != "xno"],
-    [PKG_CHECK_MODULES(SBC, [ sbc >= 1.0 ], HAVE_BLUEZ=1, HAVE_BLUEZ=0)],
-    HAVE_BLUEZ=0)
+    [PKG_CHECK_MODULES(SBC, [ sbc >= 1.0 ], HAVE_SBC=1, HAVE_SBC=0)],
+    HAVE_SBC=0)
+AS_IF([test "x$HAVE_SBC" != "x1"], HAVE_BLUEZ=0)
 AS_IF([test "x$HAVE_DBUS" != "x1"], HAVE_BLUEZ=0)
 
 AS_IF([test "x$enable_bluez" = "xyes" && test "x$HAVE_BLUEZ" = "x0"],
-    [AC_MSG_ERROR([*** BLUEZ support not found (requires D-Bus)])])
+    [AC_MSG_ERROR([*** BLUEZ support not found (requires BlueZ, sbc, and D-Bus)])])
 
 AC_SUBST(BLUEZ_CFLAGS)
 AC_SUBST(BLUEZ_LIBS)
@@ -1136,7 +1160,7 @@ AC_ARG_ENABLE([systemd],
     AS_HELP_STRING([--disable-systemd],[Disable optional systemd support]))
 
 AS_IF([test "x$enable_systemd" != "xno"],
-    [PKG_CHECK_MODULES(SYSTEMD, [ libsystemd-login libsystemd-daemon ], HAVE_SYSTEMD=1, HAVE_SYSTEMD=0)],
+    [PKG_CHECK_MODULES(SYSTEMD, [ libsystemd-login ], HAVE_SYSTEMD=1, HAVE_SYSTEMD=0)],
     HAVE_SYSTEMD=0)
 
 AS_IF([test "x$enable_systemd" = "xyes" && test "x$HAVE_SYSTEMD" = "x0"],
@@ -1211,8 +1235,6 @@ AC_SUBST(PA_SOEXT, [.so])
 
 AC_SUBST(pulseconfdir, ["${sysconfdir}/pulse"])
 AX_DEFINE_DIR(PA_DEFAULT_CONFIG_DIR, pulseconfdir, [Location of configuration files])
-
-AC_DEFINE_UNQUOTED(PA_BUILDDIR, "${ac_pwd}/src", [Location of uninstalled binaries])
 
 #### Mac OSX specific stuff #####
 
@@ -1384,7 +1406,7 @@ AS_IF([test "x$HAVE_COREAUDIO" = "x1"], ENABLE_COREAUDIO=yes, ENABLE_COREAUDIO=n
 AS_IF([test "x$HAVE_SOLARIS" = "x1"], ENABLE_SOLARIS=yes, ENABLE_SOLARIS=no)
 AS_IF([test "x$HAVE_WAVEOUT" = "x1"], ENABLE_WAVEOUT=yes, ENABLE_WAVEOUT=no)
 AS_IF([test "x$HAVE_GLIB20" = "x1"], ENABLE_GLIB20=yes, ENABLE_GLIB20=no)
-AS_IF([test "x$HAVE_GTK20" = "x1"], ENABLE_GTK20=yes, ENABLE_GTK20=no)
+AS_IF([test "x$HAVE_GTK30" = "x1"], ENABLE_GTK30=yes, ENABLE_GTK30=no)
 AS_IF([test "x$HAVE_GCONF" = "x1"], ENABLE_GCONF=yes, ENABLE_GCONF=no)
 AS_IF([test "x$HAVE_AVAHI" = "x1"], ENABLE_AVAHI=yes, ENABLE_AVAHI=no)
 AS_IF([test "x$HAVE_JACK" = "x1"], ENABLE_JACK=yes, ENABLE_JACK=no)
@@ -1437,7 +1459,7 @@ echo "
     Enable Solaris:                ${ENABLE_SOLARIS}
     Enable WaveOut:                ${ENABLE_WAVEOUT}
     Enable GLib 2.0:               ${ENABLE_GLIB20}
-    Enable Gtk+ 2.0:               ${ENABLE_GTK20}
+    Enable Gtk+ 3.0:               ${ENABLE_GTK30}
     Enable GConf:                  ${ENABLE_GCONF}
     Enable Avahi:                  ${ENABLE_AVAHI}
     Enable Jack:                   ${ENABLE_JACK}

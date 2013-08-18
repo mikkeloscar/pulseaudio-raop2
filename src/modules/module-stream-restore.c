@@ -230,11 +230,12 @@ enum entry_method_handler_index {
     ENTRY_METHOD_HANDLER_MAX
 };
 
-static pa_dbus_arg_info add_entry_args[] = { { "name",   "s",     "in" },
-                                             { "device", "s",     "in" },
-                                             { "volume", "a(uu)", "in" },
-                                             { "mute",   "b",     "in" },
-                                             { "entry",  "o",     "out" } };
+static pa_dbus_arg_info add_entry_args[] = { { "name",              "s",     "in" },
+                                             { "device",            "s",     "in" },
+                                             { "volume",            "a(uu)", "in" },
+                                             { "mute",              "b",     "in" },
+                                             { "apply_immediately", "b",     "in" },
+                                             { "entry",             "o",     "out" } };
 static pa_dbus_arg_info get_entry_by_name_args[] = { { "name", "s", "in" }, { "entry", "o", "out" } };
 
 static pa_dbus_method_handler method_handlers[METHOD_HANDLER_MAX] = {
@@ -2490,16 +2491,6 @@ fail:
     return -1;
 }
 
-#ifdef HAVE_DBUS
-static void free_dbus_entry_cb(void *p, void *userdata) {
-    struct dbus_entry *de = p;
-
-    pa_assert(de);
-
-    dbus_entry_free(de);
-}
-#endif
-
 void pa__done(pa_module*m) {
     struct userdata* u;
 
@@ -2515,7 +2506,7 @@ void pa__done(pa_module*m) {
         pa_assert_se(pa_dbus_protocol_unregister_extension(u->dbus_protocol, INTERFACE_STREAM_RESTORE) >= 0);
         pa_assert_se(pa_dbus_protocol_remove_interface(u->dbus_protocol, OBJECT_PATH, stream_restore_interface_info.name) >= 0);
 
-        pa_hashmap_free(u->dbus_entries, free_dbus_entry_cb, NULL);
+        pa_hashmap_free(u->dbus_entries, (pa_free_cb_t) dbus_entry_free);
 
         pa_dbus_protocol_unref(u->dbus_protocol);
     }
@@ -2558,7 +2549,7 @@ void pa__done(pa_module*m) {
     }
 
     if (u->subscribed)
-        pa_idxset_free(u->subscribed, NULL, NULL);
+        pa_idxset_free(u->subscribed, NULL);
 
     pa_xfree(u);
 }

@@ -247,7 +247,7 @@ fail:
     return NULL;
 }
 
-static void free_func(void *p, void*userdata) {
+static void free_func(void *p) {
     struct entry *e = p;
     pa_assert(e);
 
@@ -259,8 +259,8 @@ static void free_func(void *p, void*userdata) {
 void pa_modargs_free(pa_modargs*ma) {
     pa_assert(ma);
 
-    pa_hashmap_free(ma->raw, free_func, NULL);
-    pa_hashmap_free(ma->unescaped, free_func, NULL);
+    pa_hashmap_free(ma->raw, free_func);
+    pa_hashmap_free(ma->unescaped, free_func);
     pa_xfree(ma);
 }
 
@@ -345,6 +345,20 @@ int pa_modargs_get_value_double(pa_modargs *ma, const char *key, double *value) 
         return 0;
 
     if (pa_atod(v, value) < 0)
+        return -1;
+
+    return 0;
+}
+
+int pa_modargs_get_value_volume(pa_modargs *ma, const char *key, pa_volume_t *value) {
+    const char *v;
+
+    pa_assert(value);
+
+    if (!(v = pa_modargs_get_value(ma, key, NULL)))
+        return 0;
+
+    if (pa_parse_volume(v, value) < 0)
         return -1;
 
     return 0;
@@ -439,8 +453,12 @@ int pa_modargs_get_sample_spec_and_channel_map(
     if (pa_modargs_get_channel_map(ma, NULL, &map) < 0)
         return -1;
 
-    if (map.channels != ss.channels)
-        return -1;
+    if (map.channels != ss.channels) {
+        if (!pa_modargs_get_value(ma, "channels", NULL))
+            ss.channels = map.channels;
+        else
+            return -1;
+    }
 
     *rmap = map;
     *rss = ss;

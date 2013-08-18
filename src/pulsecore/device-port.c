@@ -26,12 +26,8 @@
 
 PA_DEFINE_PUBLIC_CLASS(pa_device_port, pa_object);
 
-void pa_device_port_set_available(pa_device_port *p, pa_port_available_t status)
+void pa_device_port_set_available(pa_device_port *p, pa_available_t status)
 {
-    uint32_t state;
-    pa_card *card;
-/*    pa_source *source;
-    pa_sink *sink; */
     pa_core *core;
 
     pa_assert(p);
@@ -39,28 +35,15 @@ void pa_device_port_set_available(pa_device_port *p, pa_port_available_t status)
     if (p->available == status)
         return;
 
-/*    pa_assert(status != PA_PORT_AVAILABLE_UNKNOWN); */
+/*    pa_assert(status != PA_AVAILABLE_UNKNOWN); */
 
     p->available = status;
-    pa_log_debug("Setting port %s to status %s", p->name, status == PA_PORT_AVAILABLE_YES ? "yes" :
-       status == PA_PORT_AVAILABLE_NO ? "no" : "unknown");
+    pa_log_debug("Setting port %s to status %s", p->name, status == PA_AVAILABLE_YES ? "yes" :
+       status == PA_AVAILABLE_NO ? "no" : "unknown");
 
     /* Post subscriptions to the card which owns us */
     pa_assert_se(core = p->core);
-    PA_IDXSET_FOREACH(card, core->cards, state)
-        if (p == pa_hashmap_get(card->ports, p->name))
-            pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, card->index);
-#if 0
-/* This stuff is temporarily commented out while figuring out whether to actually do this */
-    if (p->is_output)
-        PA_IDXSET_FOREACH(sink, core->sinks, state)
-            if (p == pa_hashmap_get(sink->ports, p->name))
-                pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_SINK|PA_SUBSCRIPTION_EVENT_CHANGE, sink->index);
-    if (p->is_input)
-        PA_IDXSET_FOREACH(source, core->sources, state)
-            if (p == pa_hashmap_get(source->ports, p->name))
-                pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_SOURCE|PA_SUBSCRIPTION_EVENT_CHANGE, source->index);
-#endif
+    pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, p->card->index);
 
     pa_hook_fire(&core->hooks[PA_CORE_HOOK_PORT_AVAILABLE_CHANGED], p);
 }
@@ -73,8 +56,10 @@ static void device_port_free(pa_object *o) {
 
     if (p->proplist)
         pa_proplist_free(p->proplist);
+
     if (p->profiles)
-        pa_hashmap_free(p->profiles, NULL, NULL);
+        pa_hashmap_free(p->profiles, NULL);
+
     pa_xfree(p->name);
     pa_xfree(p->description);
     pa_xfree(p);
@@ -92,8 +77,9 @@ pa_device_port *pa_device_port_new(pa_core *c, const char *name, const char *des
     p->name = pa_xstrdup(name);
     p->description = pa_xstrdup(description);
     p->core = c;
+    p->card = NULL;
     p->priority = 0;
-    p->available = PA_PORT_AVAILABLE_UNKNOWN;
+    p->available = PA_AVAILABLE_UNKNOWN;
     p->profiles = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
     p->is_input = FALSE;
     p->is_output = FALSE;
@@ -103,23 +89,14 @@ pa_device_port *pa_device_port_new(pa_core *c, const char *name, const char *des
     return p;
 }
 
-void pa_device_port_hashmap_free(pa_hashmap *h) {
-    pa_device_port *p;
-
-    pa_assert(h);
-
-    while ((p = pa_hashmap_steal_first(h)))
-        pa_device_port_unref(p);
-
-    pa_hashmap_free(h, NULL, NULL);
-}
-
 void pa_device_port_set_latency_offset(pa_device_port *p, int64_t offset) {
     uint32_t state;
     pa_core *core;
-    pa_card *card;
 
     pa_assert(p);
+
+    if (offset == p->latency_offset)
+        return;
 
     p->latency_offset = offset;
 
@@ -143,7 +120,6 @@ void pa_device_port_set_latency_offset(pa_device_port *p, int64_t offset) {
     }
 
     pa_assert_se(core = p->core);
-    PA_IDXSET_FOREACH(card, core->cards, state)
-        if (p == pa_hashmap_get(card->ports, p->name))
-            pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, card->index);
+    pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, p->card->index);
+    pa_hook_fire(&core->hooks[PA_CORE_HOOK_PORT_LATENCY_OFFSET_CHANGED], p);
 }

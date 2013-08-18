@@ -449,7 +449,7 @@ static void setting_free(pa_alsa_setting *s) {
     pa_assert(s);
 
     if (s->options)
-        pa_idxset_free(s->options, NULL, NULL);
+        pa_idxset_free(s->options, NULL);
 
     pa_xfree(s->name);
     pa_xfree(s->description);
@@ -530,7 +530,7 @@ void pa_alsa_path_set_free(pa_alsa_path_set *ps) {
     pa_assert(ps);
 
     if (ps->paths)
-        pa_hashmap_free(ps->paths, NULL, NULL);
+        pa_hashmap_free(ps->paths, NULL);
 
     pa_xfree(ps);
 }
@@ -1753,8 +1753,8 @@ static pa_alsa_jack* jack_get(pa_alsa_path *p, const char *section) {
             goto finish;
 
     j = pa_xnew0(pa_alsa_jack, 1);
-    j->state_unplugged = PA_PORT_AVAILABLE_NO;
-    j->state_plugged = PA_PORT_AVAILABLE_YES;
+    j->state_unplugged = PA_AVAILABLE_NO;
+    j->state_plugged = PA_AVAILABLE_YES;
     j->path = p;
     j->name = pa_xstrdup(section);
     j->alsa_name = pa_sprintf_malloc("%s Jack", section);
@@ -2167,7 +2167,7 @@ static int element_parse_override_map(pa_config_parser_state *state) {
 static int jack_parse_state(pa_config_parser_state *state) {
     pa_alsa_path *p;
     pa_alsa_jack *j;
-    pa_port_available_t pa;
+    pa_available_t pa;
 
     pa_assert(state);
 
@@ -2179,11 +2179,11 @@ static int jack_parse_state(pa_config_parser_state *state) {
     }
 
     if (pa_streq(state->rvalue, "yes"))
-	pa = PA_PORT_AVAILABLE_YES;
+	pa = PA_AVAILABLE_YES;
     else if (pa_streq(state->rvalue, "no"))
-	pa = PA_PORT_AVAILABLE_NO;
+	pa = PA_AVAILABLE_NO;
     else if (pa_streq(state->rvalue, "unknown"))
-	pa = PA_PORT_AVAILABLE_UNKNOWN;
+	pa = PA_AVAILABLE_UNKNOWN;
     else {
         pa_log("[%s:%u] state must be 'yes', 'no' or 'unknown' in '%s'", state->filename, state->lineno, state->section);
         return -1;
@@ -2336,6 +2336,7 @@ static int path_verify(pa_alsa_path *p) {
         { "analog-input-microphone-rear",     N_("Rear Microphone") },
         { "analog-input-microphone-dock",     N_("Dock Microphone") },
         { "analog-input-microphone-internal", N_("Internal Microphone") },
+        { "analog-input-microphone-headset",  N_("Headset Microphone") },
         { "analog-input-linein",        N_("Line In") },
         { "analog-input-radio",         N_("Radio") },
         { "analog-input-video",         N_("Video") },
@@ -2372,7 +2373,7 @@ static int path_verify(pa_alsa_path *p) {
 
 static const char *get_default_paths_dir(void) {
     if (pa_run_from_build_tree())
-        return PA_BUILDDIR "/modules/alsa/mixer/paths/";
+        return PA_SRCDIR "/modules/alsa/mixer/paths/";
     else
         return PA_ALSA_PATHS_DIR;
 }
@@ -2390,6 +2391,7 @@ pa_alsa_path* pa_alsa_path_new(const char *paths_dir, const char *fname, pa_alsa
         { "description",         pa_config_parse_string,            NULL, "General" },
         { "name",                pa_config_parse_string,            NULL, "General" },
         { "mute-during-activation", pa_config_parse_bool,           NULL, "General" },
+        { "eld-device",          pa_config_parse_int,               NULL, "General" },
 
         /* [Option ...] */
         { "priority",            option_parse_priority,             NULL, NULL },
@@ -2422,11 +2424,13 @@ pa_alsa_path* pa_alsa_path_new(const char *paths_dir, const char *fname, pa_alsa
     p->name = pa_xstrndup(n, strcspn(n, "."));
     p->proplist = pa_proplist_new();
     p->direction = direction;
+    p->eld_device = -1;
 
     items[0].data = &p->priority;
     items[1].data = &p->description;
     items[2].data = &p->name;
     items[3].data = &mute_during_activation;
+    items[4].data = &p->eld_device;
 
     if (!paths_dir)
         paths_dir = get_default_paths_dir();
@@ -3148,14 +3152,14 @@ static void path_set_condense(pa_alsa_path_set *ps, snd_mixer_t *m) {
         PA_HASHMAP_FOREACH(p2, ps->paths, state2) {
             pa_alsa_element *ea, *eb;
             pa_alsa_jack *ja, *jb;
-            pa_bool_t is_subset = TRUE;
+            bool is_subset = true;
 
             if (p == p2)
                 continue;
 
             /* If a has a jack that b does not have, a is not a subset */
             PA_LLIST_FOREACH(ja, p->jacks) {
-                pa_bool_t exists = FALSE;
+                bool exists = false;
 
                 if (!ja->has_control)
                     continue;
@@ -3164,35 +3168,34 @@ static void path_set_condense(pa_alsa_path_set *ps, snd_mixer_t *m) {
                     if (jb->has_control && pa_streq(jb->alsa_name, ja->alsa_name) &&
                        (ja->state_plugged == jb->state_plugged) &&
                        (ja->state_unplugged == jb->state_unplugged)) {
-                        exists = TRUE;
+                        exists = true;
                         break;
                     }
                 }
 
                 if (!exists) {
-                    is_subset = FALSE;
+                    is_subset = false;
                     break;
                 }
             }
 
             /* Compare the elements of each set... */
-            pa_assert_se(ea = p->elements);
-            pa_assert_se(eb = p2->elements);
+            ea = p->elements;
+            eb = p2->elements;
 
             while (is_subset) {
-                if (pa_streq(ea->alsa_name, eb->alsa_name)) {
+                if (!ea && !eb)
+                    break;
+                else if ((ea && !eb) || (!ea && eb))
+                    is_subset = false;
+                else if (pa_streq(ea->alsa_name, eb->alsa_name)) {
                     if (element_is_subset(ea, eb, m)) {
                         ea = ea->next;
                         eb = eb->next;
-                        if ((ea && !eb) || (!ea && eb))
-                            is_subset = FALSE;
-                        else if (!ea && !eb)
-                            break;
                     } else
-                        is_subset = FALSE;
-
+                        is_subset = false;
                 } else
-                    is_subset = FALSE;
+                    is_subset = false;
             }
 
             if (is_subset) {
@@ -3289,10 +3292,10 @@ static void profile_free(pa_alsa_profile *p) {
     pa_xstrfreev(p->output_mapping_names);
 
     if (p->input_mappings)
-        pa_idxset_free(p->input_mappings, NULL, NULL);
+        pa_idxset_free(p->input_mappings, NULL);
 
     if (p->output_mappings)
-        pa_idxset_free(p->output_mappings, NULL, NULL);
+        pa_idxset_free(p->output_mappings, NULL);
 
     pa_xfree(p);
 }
@@ -3300,50 +3303,20 @@ static void profile_free(pa_alsa_profile *p) {
 void pa_alsa_profile_set_free(pa_alsa_profile_set *ps) {
     pa_assert(ps);
 
-    if (ps->input_paths) {
-        pa_alsa_path *p;
+    if (ps->input_paths)
+        pa_hashmap_free(ps->input_paths, (pa_free_cb_t) pa_alsa_path_free);
 
-        while ((p = pa_hashmap_steal_first(ps->input_paths)))
-            pa_alsa_path_free(p);
+    if (ps->output_paths)
+        pa_hashmap_free(ps->output_paths, (pa_free_cb_t) pa_alsa_path_free);
 
-        pa_hashmap_free(ps->input_paths, NULL, NULL);
-    }
+    if (ps->profiles)
+        pa_hashmap_free(ps->profiles, (pa_free_cb_t) profile_free);
 
-    if (ps->output_paths) {
-        pa_alsa_path *p;
+    if (ps->mappings)
+        pa_hashmap_free(ps->mappings, (pa_free_cb_t) mapping_free);
 
-        while ((p = pa_hashmap_steal_first(ps->output_paths)))
-            pa_alsa_path_free(p);
-
-        pa_hashmap_free(ps->output_paths, NULL, NULL);
-    }
-
-    if (ps->profiles) {
-        pa_alsa_profile *p;
-
-        while ((p = pa_hashmap_steal_first(ps->profiles)))
-            profile_free(p);
-
-        pa_hashmap_free(ps->profiles, NULL, NULL);
-    }
-
-    if (ps->mappings) {
-        pa_alsa_mapping *m;
-
-        while ((m = pa_hashmap_steal_first(ps->mappings)))
-            mapping_free(m);
-
-        pa_hashmap_free(ps->mappings, NULL, NULL);
-    }
-
-    if (ps->decibel_fixes) {
-        pa_alsa_decibel_fix *db_fix;
-
-        while ((db_fix = pa_hashmap_steal_first(ps->decibel_fixes)))
-            decibel_fix_free(db_fix);
-
-        pa_hashmap_free(ps->decibel_fixes, NULL, NULL);
-    }
+    if (ps->decibel_fixes)
+        pa_hashmap_free(ps->decibel_fixes, (pa_free_cb_t) decibel_fix_free);
 
     pa_xfree(ps);
 }
@@ -3770,7 +3743,7 @@ static void mapping_paths_probe(pa_alsa_mapping *m, pa_alsa_profile *profile,
     mixer_handle = pa_alsa_open_mixer_for_pcm(pcm_handle, NULL, &hctl_handle);
     if (!mixer_handle || !hctl_handle) {
          /* Cannot open mixer, remove all entries */
-        while (pa_hashmap_steal_first(ps->paths));
+        pa_hashmap_remove_all(ps->paths, NULL);
         return;
     }
 
@@ -4174,7 +4147,7 @@ pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel
         fname = "default.conf";
 
     fn = pa_maybe_prefix_path(fname,
-                              pa_run_from_build_tree() ? PA_BUILDDIR "/modules/alsa/mixer/profile-sets/" :
+                              pa_run_from_build_tree() ? PA_SRCDIR "/modules/alsa/mixer/profile-sets/" :
                               PA_ALSA_PROFILE_SETS_DIR);
 
     r = pa_config_parse(fn, NULL, items, NULL, ps);
@@ -4415,8 +4388,8 @@ void pa_alsa_profile_set_probe(
 
     paths_drop_unsupported(ps->input_paths);
     paths_drop_unsupported(ps->output_paths);
-    pa_hashmap_free(broken_inputs, NULL, NULL);
-    pa_hashmap_free(broken_outputs, NULL, NULL);
+    pa_hashmap_free(broken_inputs, NULL);
+    pa_hashmap_free(broken_outputs, NULL);
 
     ps->probed = TRUE;
 }

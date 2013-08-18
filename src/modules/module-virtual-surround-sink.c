@@ -382,11 +382,11 @@ static void sink_input_attach_cb(pa_sink_input *i) {
 
     pa_sink_set_fixed_latency_within_thread(u->sink, i->sink->thread_info.fixed_latency);
 
-    pa_sink_set_max_request_within_thread(u->sink, pa_sink_input_get_max_request(i));
+    pa_sink_set_max_request_within_thread(u->sink, pa_sink_input_get_max_request(i) * u->sink_fs / u->fs);
 
     /* FIXME: Too small max_rewind:
      * https://bugs.freedesktop.org/show_bug.cgi?id=53709 */
-    pa_sink_set_max_rewind_within_thread(u->sink, pa_sink_input_get_max_rewind(i));
+    pa_sink_set_max_rewind_within_thread(u->sink, pa_sink_input_get_max_rewind(i) * u->sink_fs / u->fs);
 
     pa_sink_attach_within_thread(u->sink);
 }
@@ -427,16 +427,6 @@ static void sink_input_state_change_cb(pa_sink_input *i, pa_sink_input_state_t s
         pa_log_debug("Requesting rewind due to state change.");
         pa_sink_input_request_rewind(i, 0, FALSE, TRUE, TRUE);
     }
-}
-
-/* Called from main context */
-static pa_bool_t sink_input_may_move_to_cb(pa_sink_input *i, pa_sink *dest) {
-    struct userdata *u;
-
-    pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
-
-    return u->sink != dest;
 }
 
 /* Called from main context */
@@ -550,10 +540,13 @@ int pa__init(pa_module*m) {
     pa_channel_map hrir_map;
 
     pa_sample_spec hrir_temp_ss;
-    pa_memchunk hrir_temp_chunk;
+    pa_memchunk hrir_temp_chunk, hrir_temp_chunk_resampled;
     pa_resampler *resampler;
 
+    size_t hrir_copied_length, hrir_total_length;
+
     hrir_temp_chunk.memblock = NULL;
+    hrir_temp_chunk_resampled.memblock = NULL;
 
     pa_assert(m);
 
@@ -704,7 +697,6 @@ int pa__init(pa_module*m) {
     u->sink_input->attach = sink_input_attach_cb;
     u->sink_input->detach = sink_input_detach_cb;
     u->sink_input->state_change = sink_input_state_change_cb;
-    u->sink_input->may_move_to = sink_input_may_move_to_cb;
     u->sink_input->moving = sink_input_moving_cb;
     u->sink_input->volume_changed = use_volume_sharing ? NULL : sink_input_volume_changed_cb;
     u->sink_input->mute_changed = sink_input_mute_changed_cb;
@@ -719,17 +711,47 @@ int pa__init(pa_module*m) {
     /* resample hrir */
     resampler = pa_resampler_new(u->sink->core->mempool, &hrir_temp_ss, &hrir_map, &hrir_ss, &hrir_map,
                                  PA_RESAMPLER_SRC_SINC_BEST_QUALITY, PA_RESAMPLER_NO_REMAP);
-    pa_resampler_run(resampler, &hrir_temp_chunk, &hrir_temp_chunk);
-    pa_resampler_free(resampler);
 
-    u->hrir_samples =  hrir_temp_chunk.length / pa_frame_size(&hrir_ss);
+    u->hrir_samples = hrir_temp_chunk.length / pa_frame_size(&hrir_temp_ss) * hrir_ss.rate / hrir_temp_ss.rate;
+    if (u->hrir_samples > 64) {
+        u->hrir_samples = 64;
+        pa_log("The (resampled) hrir contains more than 64 samples. Only the first 64 samples will be used to limit processor usage.");
+    }
+
+    hrir_total_length = u->hrir_samples * pa_frame_size(&hrir_ss);
     u->hrir_channels = hrir_ss.channels;
 
-    /* copy hrir data */
-    hrir_data = (float *) pa_memblock_acquire(hrir_temp_chunk.memblock);
-    u->hrir_data = (float *) pa_xmalloc(hrir_temp_chunk.length);
-    memcpy(u->hrir_data, hrir_data, hrir_temp_chunk.length);
-    pa_memblock_release(hrir_temp_chunk.memblock);
+    u->hrir_data = (float *) pa_xmalloc(hrir_total_length);
+    hrir_copied_length = 0;
+
+    /* add silence to the hrir until we get enough samples out of the resampler */
+    while (hrir_copied_length < hrir_total_length) {
+        pa_resampler_run(resampler, &hrir_temp_chunk, &hrir_temp_chunk_resampled);
+        if (hrir_temp_chunk.memblock != hrir_temp_chunk_resampled.memblock) {
+            /* Silence input block */
+            pa_silence_memblock(hrir_temp_chunk.memblock, &hrir_temp_ss);
+        }
+
+        if (hrir_temp_chunk_resampled.memblock) {
+            /* Copy hrir data */
+            hrir_data = (float *) pa_memblock_acquire(hrir_temp_chunk_resampled.memblock);
+
+            if (hrir_total_length - hrir_copied_length >= hrir_temp_chunk_resampled.length) {
+                memcpy(u->hrir_data + hrir_copied_length, hrir_data, hrir_temp_chunk_resampled.length);
+                hrir_copied_length += hrir_temp_chunk_resampled.length;
+            } else {
+                memcpy(u->hrir_data + hrir_copied_length, hrir_data, hrir_total_length - hrir_copied_length);
+                hrir_copied_length = hrir_total_length;
+            }
+
+            pa_memblock_release(hrir_temp_chunk_resampled.memblock);
+            pa_memblock_unref(hrir_temp_chunk_resampled.memblock);
+            hrir_temp_chunk_resampled.memblock = NULL;
+        }
+    }
+
+    pa_resampler_free(resampler);
+
     pa_memblock_unref(hrir_temp_chunk.memblock);
     hrir_temp_chunk.memblock = NULL;
 
@@ -796,6 +818,9 @@ int pa__init(pa_module*m) {
 fail:
     if (hrir_temp_chunk.memblock)
         pa_memblock_unref(hrir_temp_chunk.memblock);
+
+    if (hrir_temp_chunk_resampled.memblock)
+        pa_memblock_unref(hrir_temp_chunk_resampled.memblock);
 
     if (ma)
         pa_modargs_free(ma);

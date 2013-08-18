@@ -50,6 +50,8 @@ PA_MODULE_LOAD_ONCE(TRUE);
 #define MAX_MODULES 10
 #define BUF_MAX 2048
 
+struct userdata;
+
 struct module_item {
     char *name;
     char *args;
@@ -57,6 +59,7 @@ struct module_item {
 };
 
 struct module_info {
+    struct userdata *userdata;
     char *name;
 
     struct module_item items[MAX_MODULES];
@@ -128,10 +131,13 @@ static char *read_string(struct userdata *u) {
     }
 }
 
-static void unload_one_module(struct userdata *u, struct module_info*m, unsigned i) {
-    pa_assert(u);
+static void unload_one_module(struct module_info *m, unsigned i) {
+    struct userdata *u;
+
     pa_assert(m);
     pa_assert(i < m->n_items);
+
+    u = m->userdata;
 
     if (m->items[i].index == PA_INVALID_INDEX)
         return;
@@ -144,32 +150,32 @@ static void unload_one_module(struct userdata *u, struct module_info*m, unsigned
     m->items[i].name = m->items[i].args = NULL;
 }
 
-static void unload_all_modules(struct userdata *u, struct module_info*m) {
+static void unload_all_modules(struct module_info *m) {
     unsigned i;
 
-    pa_assert(u);
     pa_assert(m);
 
     for (i = 0; i < m->n_items; i++)
-        unload_one_module(u, m, i);
+        unload_one_module(m, i);
 
     m->n_items = 0;
 }
 
 static void load_module(
-        struct userdata *u,
         struct module_info *m,
         unsigned i,
         const char *name,
         const char *args,
         pa_bool_t is_new) {
 
+    struct userdata *u;
     pa_module *mod;
 
-    pa_assert(u);
     pa_assert(m);
     pa_assert(name);
     pa_assert(args);
+
+    u = m->userdata;
 
     if (!is_new) {
         if (m->items[i].index != PA_INVALID_INDEX &&
@@ -177,7 +183,7 @@ static void load_module(
             pa_streq(m->items[i].args, args))
             return;
 
-        unload_one_module(u, m, i);
+        unload_one_module(m, i);
     }
 
     pa_log_debug("Loading module '%s' with args '%s' due to GConf configuration.", name, args);
@@ -194,14 +200,12 @@ static void load_module(
     m->items[i].index = mod->index;
 }
 
-static void module_info_free(void *p, void *userdata) {
+static void module_info_free(void *p) {
     struct module_info *m = p;
-    struct userdata *u = userdata;
 
     pa_assert(m);
-    pa_assert(u);
 
-    unload_all_modules(u, m);
+    unload_all_modules(m);
     pa_xfree(m->name);
     pa_xfree(m);
 }
@@ -233,6 +237,7 @@ static int handle_event(struct userdata *u) {
 
                 if (!(m = pa_hashmap_get(u->module_infos, name))) {
                     m = pa_xnew(struct module_info, 1);
+                    m->userdata = u;
                     m->name = name;
                     m->n_items = 0;
                     pa_hashmap_put(u->module_infos, m->name, m);
@@ -260,7 +265,7 @@ static int handle_event(struct userdata *u) {
                         goto fail;
                     }
 
-                    load_module(u, m, i, module, args, i >= m->n_items);
+                    load_module(m, i, module, args, i >= m->n_items);
 
                     i++;
 
@@ -270,7 +275,7 @@ static int handle_event(struct userdata *u) {
 
                 /* Unload all removed modules */
                 for (j = i; j < m->n_items; j++)
-                    unload_one_module(u, m, j);
+                    unload_one_module(m, j);
 
                 m->n_items = i;
 
@@ -286,7 +291,7 @@ static int handle_event(struct userdata *u) {
 
                 if ((m = pa_hashmap_get(u->module_infos, name))) {
                     pa_hashmap_remove(u->module_infos, name);
-                    module_info_free(m, u);
+                    module_info_free(m);
                 }
 
                 pa_xfree(name);
@@ -396,7 +401,7 @@ void pa__done(pa_module*m) {
         pa_close(u->fd);
 
     if (u->module_infos)
-        pa_hashmap_free(u->module_infos, module_info_free, u);
+        pa_hashmap_free(u->module_infos, (pa_free_cb_t) module_info_free);
 
     pa_xfree(u);
 }

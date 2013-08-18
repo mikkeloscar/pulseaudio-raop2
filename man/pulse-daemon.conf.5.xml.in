@@ -67,7 +67,7 @@ USA.
     <option>
       <p><opt>allow-module-loading=</opt> Allow/disallow module
       loading after startup. This is a security feature that if
-      dsabled makes sure that no further modules may be loaded into
+      disabled makes sure that no further modules may be loaded into
       the PulseAudio server after startup completed. It is recommended
       to disable this when <opt>system-instance</opt> is
       enabled. Please note that certain features like automatic
@@ -100,7 +100,7 @@ USA.
       desktop CPUs the float point resampler is a lot faster, and it
       also offers slightly better quality. See the output of
       <opt>dump-resample-methods</opt> for a complete list of all
-      available resamplers. Defaults to <opt>speex-float-3</opt>. The
+      available resamplers. Defaults to <opt>speex-float-1</opt>. The
       <opt>--resample-method</opt> command line option takes precedence.
       Note that some modules overwrite or allow overwriting of the
       resampler to use.</p>
@@ -113,8 +113,8 @@ USA.
     </option>
 
     <option>
-      <p><opt>enable-lfe-remixing=</opt> if disabeld when upmixing or
-      downmixing ignore LFE channels. When this option is dsabled the
+      <p><opt>enable-lfe-remixing=</opt> If disabled when upmixing or
+      downmixing ignore LFE channels. When this option is disabled the
       output LFE channel will only get a signal when an input LFE
       channel is available as well. If no input LFE channel is
       available the output LFE channel will always be 0. If no output
@@ -144,7 +144,7 @@ USA.
 
     <option>
       <p><opt>system-instance=</opt> Run the daemon as system-wide
-      instance, requires root priviliges. Takes a boolean argument,
+      instance, requires root privileges. Takes a boolean argument,
       defaults to <opt>no</opt>. The <opt>--system</opt> command line
       argument takes precedence.</p>
     </option>
@@ -297,12 +297,15 @@ USA.
 
     <option>
       <p><opt>log-target=</opt> The default log target. Use either
-      <opt>stderr</opt>, <opt>syslog</opt> or <opt>auto</opt>. The
-      latter is equivalent to <opt>sylog</opt> in case
-      <opt>daemonize</opt> is enabled, otherwise to
-      <opt>stderr</opt>. Defaults to <opt>auto</opt>. The
-      <opt>--log-target</opt> command line option takes
-      precedence.</p>
+      <opt>stderr</opt>, <opt>syslog</opt>, <opt>auto</opt>,
+      <opt>file:PATH</opt> or <opt>newfile:PATH</opt>. <opt>auto</opt> is
+      equivalent to <opt>sylog</opt> in case <opt>daemonize</opt> is enabled,
+      otherwise to <opt>stderr</opt>. If set to <opt>file:PATH</opt>, logging
+      is directed to the file indicated by PATH. <opt>newfile:PATH</opt> is
+      otherwise the same as <opt>file:PATH</opt>, but existing files are never
+      overwritten. If the specified file already exists, a suffix is added to
+      the file name to avoid overwriting. Defaults to <opt>auto</opt>. The
+      <opt>--log-target</opt> command line option takes precedence.</p>
     </option>
 
     <option>
@@ -437,7 +440,8 @@ USA.
       or 48kHz. Switching between default and alternate values is
       enabled only when the sinks/sources are suspended. This option
       is ignored in passthrough mode where the stream rate will be used.
-      If set to zero, this feature is disabled.</p>
+      If set to the same as the default sample rate, this feature is
+      disabled.</p>
     </option>
 
   </section>
@@ -469,8 +473,8 @@ USA.
     <p>With the flat volume feature enabled, the sink HW volume is set
     to the same level as the highest volume input stream. Any other streams
     (with lower volumes) have the appropriate adjustment applied in SW to
-    bring them to the correct overall level. Sadly hadware mixer changes
-    cannot be timed accurately and thus this change of volumes can somtimes
+    bring them to the correct overall level. Sadly hardware mixer changes
+    cannot be timed accurately and thus this change of volumes can sometimes
     cause the resulting output sound to be momentarily too loud or too soft.
     So to ensure SW and HW volumes are applied concurrently without any
     glitches, their application needs to be synchronized. The sink

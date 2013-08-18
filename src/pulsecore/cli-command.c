@@ -1423,6 +1423,8 @@ static int pa_cli_command_suspend_sink(pa_core *c, pa_tokenizer *t, pa_strbuf *b
         return -1;
     }
 
+    pa_log_debug("%s of sink %s requested via CLI.", suspend ? "Suspending" : "Resuming", sink->name);
+
     if ((r = pa_sink_suspend(sink, suspend, PA_SUSPEND_USER)) < 0)
         pa_strbuf_printf(buf, "Failed to resume/suspend sink: %s\n", pa_strerror(r));
 
@@ -1459,6 +1461,8 @@ static int pa_cli_command_suspend_source(pa_core *c, pa_tokenizer *t, pa_strbuf 
         return -1;
     }
 
+    pa_log_debug("%s of source %s requested via CLI.", suspend ? "Suspending" : "Resuming", source->name);
+
     if ((r = pa_source_suspend(source, suspend, PA_SUSPEND_USER)) < 0)
         pa_strbuf_printf(buf, "Failed to resume/suspend source: %s\n", pa_strerror(r));
 
@@ -1483,6 +1487,8 @@ static int pa_cli_command_suspend(pa_core *c, pa_tokenizer *t, pa_strbuf *buf, p
         pa_strbuf_puts(buf, "Failed to parse suspend switch.\n");
         return -1;
     }
+
+    pa_log_debug("%s of all sinks and sources requested via CLI.", suspend ? "Suspending" : "Resuming");
 
     if ((r = pa_sink_suspend_all(c, suspend, PA_SUSPEND_USER)) < 0)
         pa_strbuf_printf(buf, "Failed to resume/suspend all sinks: %s\n", pa_strerror(r));
@@ -1559,7 +1565,7 @@ static int pa_cli_command_log_level(pa_core *c, pa_tokenizer *t, pa_strbuf *buf,
 
 static int pa_cli_command_log_meta(pa_core *c, pa_tokenizer *t, pa_strbuf *buf, pa_bool_t *fail) {
     const char *m;
-    pa_bool_t b;
+    int b;
 
     pa_core_assert_ref(c);
     pa_assert(t);
@@ -1583,7 +1589,7 @@ static int pa_cli_command_log_meta(pa_core *c, pa_tokenizer *t, pa_strbuf *buf, 
 
 static int pa_cli_command_log_time(pa_core *c, pa_tokenizer *t, pa_strbuf *buf, pa_bool_t *fail) {
     const char *m;
-    pa_bool_t b;
+    int b;
 
     pa_core_assert_ref(c);
     pa_assert(t);
@@ -2056,11 +2062,21 @@ int pa_cli_command_execute_line_stateful(pa_core *c, const char *s, pa_strbuf *b
                             char *pathname;
 
                             pathname = pa_sprintf_malloc("%s" PA_PATH_SEP "%s", p, filename);
-                            pa_xfree(p);
 
                             *ifstate = access(pathname, F_OK) == 0 ? IFSTATE_TRUE : IFSTATE_FALSE;
                             pa_log_debug("Checking for existence of '%s': %s", pathname, *ifstate == IFSTATE_TRUE ? "success" : "failure");
 
+                            if (PA_UNLIKELY(pa_run_from_build_tree())) {
+                                /* If run from the build tree, search in <path>/.libs as well */
+                                char *ltpathname = pa_sprintf_malloc("%s" PA_PATH_SEP ".libs" PA_PATH_SEP "%s", p, filename);
+
+                                *ifstate = access(ltpathname, F_OK) == 0 ? IFSTATE_TRUE : IFSTATE_FALSE;
+                                pa_log_debug("Checking for existence of '%s': %s", ltpathname, *ifstate == IFSTATE_TRUE ? "success" : "failure");
+
+                                pa_xfree(ltpathname);
+                            }
+
+                            pa_xfree(p);
                             pa_xfree(pathname);
 
                             if (*ifstate == IFSTATE_TRUE)

@@ -148,6 +148,8 @@ static pa_hook_result_t reserve_cb(pa_reserve_wrapper *r, void *forced, struct u
     pa_assert(r);
     pa_assert(u);
 
+    pa_log_debug("Suspending source %s, because another application requested us to release the device.", u->source->name);
+
     if (pa_source_suspend(u->source, TRUE, PA_SUSPEND_APPLICATION) < 0)
         return PA_HOOK_CANCEL;
 
@@ -210,14 +212,17 @@ static int reserve_init(struct userdata *u, const char *dname) {
 }
 
 static pa_hook_result_t monitor_cb(pa_reserve_monitor_wrapper *w, void* busy, struct userdata *u) {
-    pa_bool_t b;
-
     pa_assert(w);
     pa_assert(u);
 
-    b = PA_PTR_TO_UINT(busy) && !u->reserve;
+    if (PA_PTR_TO_UINT(busy) && !u->reserve) {
+        pa_log_debug("Suspending source %s, because another application is blocking the access to the device.", u->source->name);
+        pa_source_suspend(u->source, true, PA_SUSPEND_APPLICATION);
+    } else {
+        pa_log_debug("Resuming source %s, because other applications aren't blocking access to the device any more.", u->source->name);
+        pa_source_suspend(u->source, false, PA_SUSPEND_APPLICATION);
+    }
 
-    pa_source_suspend(u->source, b, PA_SUSPEND_APPLICATION);
     return PA_HOOK_OK;
 }
 
@@ -767,6 +772,7 @@ static void update_smoother(struct userdata *u) {
     int err;
     pa_usec_t now1 = 0, now2;
     snd_pcm_status_t *status;
+    snd_htimestamp_t htstamp = { 0, 0 };
 
     snd_pcm_status_alloca(&status);
 
@@ -775,18 +781,13 @@ static void update_smoother(struct userdata *u) {
 
     /* Let's update the time smoother */
 
-    if (PA_UNLIKELY((err = pa_alsa_safe_delay(u->pcm_handle, &delay, u->hwbuf_size, &u->source->sample_spec, TRUE)) < 0)) {
+    if (PA_UNLIKELY((err = pa_alsa_safe_delay(u->pcm_handle, status, &delay, u->hwbuf_size, &u->source->sample_spec, TRUE)) < 0)) {
         pa_log_warn("Failed to get delay: %s", pa_alsa_strerror(err));
         return;
     }
 
-    if (PA_UNLIKELY((err = snd_pcm_status(u->pcm_handle, status)) < 0))
-        pa_log_warn("Failed to get timestamp: %s", pa_alsa_strerror(err));
-    else {
-        snd_htimestamp_t htstamp = { 0, 0 };
-        snd_pcm_status_get_htstamp(status, &htstamp);
-        now1 = pa_timespec_load(&htstamp);
-    }
+    snd_pcm_status_get_htstamp(status, &htstamp);
+    now1 = pa_timespec_load(&htstamp);
 
     /* Hmm, if the timestamp is 0, then it wasn't set and we take the current time */
     if (now1 <= 0)
@@ -1423,7 +1424,7 @@ static pa_bool_t source_update_rate_cb(pa_source *s, uint32_t rate)
     }
 
     if (!supported) {
-        pa_log_info("Sink does not support sample rate of %d Hz", rate);
+        pa_log_info("Source does not support sample rate of %d Hz", rate);
         return FALSE;
     }
 
@@ -1451,7 +1452,7 @@ static void thread_func(void *userdata) {
 
     for (;;) {
         int ret;
-        pa_usec_t rtpoll_sleep = 0;
+        pa_usec_t rtpoll_sleep = 0, real_sleep;
 
 #ifdef DEBUG_TIMING
         pa_log_debug("Loop");
@@ -1515,14 +1516,28 @@ static void thread_func(void *userdata) {
             }
         }
 
-        if (rtpoll_sleep > 0)
+        if (rtpoll_sleep > 0) {
             pa_rtpoll_set_timer_relative(u->rtpoll, rtpoll_sleep);
+            real_sleep = pa_rtclock_now();
+        }
         else
             pa_rtpoll_set_timer_disabled(u->rtpoll);
 
         /* Hmm, nothing to do. Let's sleep */
         if ((ret = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
             goto fail;
+
+        if (rtpoll_sleep > 0) {
+            real_sleep = pa_rtclock_now() - real_sleep;
+#ifdef DEBUG_TIMING
+            pa_log_debug("Expected sleep: %0.2fms, real sleep: %0.2fms (diff %0.2f ms)",
+                (double) rtpoll_sleep / PA_USEC_PER_MSEC, (double) real_sleep / PA_USEC_PER_MSEC,
+                (double) ((int64_t) real_sleep - (int64_t) rtpoll_sleep) / PA_USEC_PER_MSEC);
+#endif
+            if (u->use_tsched && real_sleep > rtpoll_sleep + u->tsched_watermark)
+                pa_log_info("Scheduling delay of %0.2fms, you might want to investigate this to improve latency...",
+                    (double) (real_sleep - rtpoll_sleep) / PA_USEC_PER_MSEC);
+        }
 
         if (u->source->flags & PA_SOURCE_DEFERRED_VOLUME)
             pa_source_volume_change_apply(u->source, NULL);
@@ -1716,6 +1731,7 @@ pa_source *pa_alsa_source_new(pa_module *m, pa_modargs *ma, const char*driver, p
     struct userdata *u = NULL;
     const char *dev_id = NULL, *key, *mod_name;
     pa_sample_spec ss;
+    char *thread_name = NULL;
     uint32_t alternate_sample_rate;
     pa_channel_map map;
     uint32_t nfrags, frag_size, buffer_size, tsched_size, tsched_watermark;
@@ -1912,7 +1928,7 @@ pa_source *pa_alsa_source_new(pa_module *m, pa_modargs *ma, const char*driver, p
             pa_log_info("Disabling latency range changes on overrun");
     }
 
-    u->rates = pa_alsa_get_supported_rates(u->pcm_handle);
+    u->rates = pa_alsa_get_supported_rates(u->pcm_handle, ss.rate);
     if (!u->rates) {
         pa_log_error("Failed to find any supported sample rates.");
         goto fail;
@@ -2043,10 +2059,13 @@ pa_source *pa_alsa_source_new(pa_module *m, pa_modargs *ma, const char*driver, p
 
     pa_alsa_dump(PA_LOG_DEBUG, u->pcm_handle);
 
-    if (!(u->thread = pa_thread_new("alsa-source", thread_func, u))) {
+    thread_name = pa_sprintf_malloc("alsa-source-%s", pa_strnull(pa_proplist_gets(u->source->proplist, "alsa.id")));
+    if (!(u->thread = pa_thread_new(thread_name, thread_func, u))) {
         pa_log("Failed to create thread.");
         goto fail;
     }
+    pa_xfree(thread_name);
+    thread_name = NULL;
 
     /* Get initial mixer settings */
     if (data.volume_is_set) {
@@ -2076,6 +2095,7 @@ pa_source *pa_alsa_source_new(pa_module *m, pa_modargs *ma, const char*driver, p
     return u->source;
 
 fail:
+    pa_xfree(thread_name);
 
     if (u)
         userdata_free(u);

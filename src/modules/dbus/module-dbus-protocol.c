@@ -117,6 +117,7 @@ static void client_kill_cb(pa_client *c) {
     pa_assert(c->userdata);
 
     conn = c->userdata;
+    pa_idxset_remove_by_data(conn->server->userdata->connections, conn, NULL);
     connection_free(conn);
     c->userdata = NULL;
 
@@ -584,7 +585,6 @@ fail:
 
 void pa__done(pa_module *m) {
     struct userdata *u;
-    struct connection *c;
 
     pa_assert(m);
 
@@ -594,12 +594,8 @@ void pa__done(pa_module *m) {
     if (u->core_iface)
         pa_dbusiface_core_free(u->core_iface);
 
-    if (u->connections) {
-        while ((c = pa_idxset_steal_first(u->connections, NULL)))
-            connection_free(c);
-
-        pa_idxset_free(u->connections, NULL, NULL);
-    }
+    if (u->connections)
+        pa_idxset_free(u->connections, (pa_free_cb_t) connection_free);
 
     /* This must not be called before the connections are freed, because if
      * there are any connections left, they will emit the

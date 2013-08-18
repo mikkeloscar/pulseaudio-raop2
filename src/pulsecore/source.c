@@ -40,7 +40,7 @@
 #include <pulsecore/namereg.h>
 #include <pulsecore/core-subscribe.h>
 #include <pulsecore/log.h>
-#include <pulsecore/sample-util.h>
+#include <pulsecore/mix.h>
 #include <pulsecore/flist.h>
 
 #include "source.h"
@@ -133,7 +133,7 @@ void pa_source_new_data_done(pa_source_new_data *data) {
     pa_proplist_free(data->proplist);
 
     if (data->ports)
-        pa_device_port_hashmap_free(data->ports);
+        pa_hashmap_free(data->ports, (pa_free_cb_t) pa_device_port_unref);
 
     pa_xfree(data->name);
     pa_xfree(data->active_port);
@@ -648,7 +648,6 @@ void pa_source_unlink(pa_source *s) {
 
 /* Called from main context */
 static void source_free(pa_object *o) {
-    pa_source_output *so;
     pa_source *s = PA_SOURCE(o);
 
     pa_assert(s);
@@ -660,12 +659,8 @@ static void source_free(pa_object *o) {
 
     pa_log_info("Freeing source %u \"%s\"", s->index, s->name);
 
-    pa_idxset_free(s->outputs, NULL, NULL);
-
-    while ((so = pa_hashmap_steal_first(s->thread_info.outputs)))
-        pa_source_output_unref(so);
-
-    pa_hashmap_free(s->thread_info.outputs, NULL, NULL);
+    pa_idxset_free(s->outputs, NULL);
+    pa_hashmap_free(s->thread_info.outputs, (pa_free_cb_t) pa_source_output_unref);
 
     if (s->silence.memblock)
         pa_memblock_unref(s->silence.memblock);
@@ -677,7 +672,7 @@ static void source_free(pa_object *o) {
         pa_proplist_free(s->proplist);
 
     if (s->ports)
-        pa_device_port_hashmap_free(s->ports);
+        pa_hashmap_free(s->ports, (pa_free_cb_t) pa_device_port_unref);
 
     pa_xfree(s);
 }
@@ -692,16 +687,36 @@ void pa_source_set_asyncmsgq(pa_source *s, pa_asyncmsgq *q) {
 
 /* Called from main context, and not while the IO thread is active, please */
 void pa_source_update_flags(pa_source *s, pa_source_flags_t mask, pa_source_flags_t value) {
+    pa_source_flags_t old_flags;
+    pa_source_output *output;
+    uint32_t idx;
+
     pa_source_assert_ref(s);
     pa_assert_ctl_context();
-
-    if (mask == 0)
-        return;
 
     /* For now, allow only a minimal set of flags to be changed. */
     pa_assert((mask & ~(PA_SOURCE_DYNAMIC_LATENCY|PA_SOURCE_LATENCY)) == 0);
 
+    old_flags = s->flags;
     s->flags = (s->flags & ~mask) | (value & mask);
+
+    if (s->flags == old_flags)
+        return;
+
+    if ((s->flags & PA_SOURCE_LATENCY) != (old_flags & PA_SOURCE_LATENCY))
+        pa_log_debug("Source %s: LATENCY flag %s.", s->name, (s->flags & PA_SOURCE_LATENCY) ? "enabled" : "disabled");
+
+    if ((s->flags & PA_SOURCE_DYNAMIC_LATENCY) != (old_flags & PA_SOURCE_DYNAMIC_LATENCY))
+        pa_log_debug("Source %s: DYNAMIC_LATENCY flag %s.",
+                     s->name, (s->flags & PA_SOURCE_DYNAMIC_LATENCY) ? "enabled" : "disabled");
+
+    pa_subscription_post(s->core, PA_SUBSCRIPTION_EVENT_SOURCE | PA_SUBSCRIPTION_EVENT_CHANGE, s->index);
+    pa_hook_fire(&s->core->hooks[PA_CORE_HOOK_SOURCE_FLAGS_CHANGED], s);
+
+    PA_IDXSET_FOREACH(output, s->outputs, idx) {
+        if (output->destination_source)
+            pa_source_update_flags(output->destination_source, mask, value);
+    }
 }
 
 /* Called from IO context, or before _put() from main context */
@@ -1000,9 +1015,13 @@ pa_bool_t pa_source_update_rate(pa_source *s, uint32_t rate, pa_bool_t passthrou
             desired_rate = rate; /* use stream sampling rate, discard default/alternate settings */
         }
 
+        if (desired_rate == s->sample_spec.rate)
+            return FALSE;
+
         if (!passthrough && pa_source_used_by(s) > 0)
             return FALSE;
 
+        pa_log_debug("Suspending source %s due to changing the sample rate.", s->name);
         pa_source_suspend(s, TRUE, PA_SUSPEND_IDLE); /* needed before rate update, will be resumed automatically */
 
         if (s->update_rate(s, desired_rate) == TRUE) {
@@ -2512,6 +2531,8 @@ void pa_source_set_fixed_latency_within_thread(pa_source *s, pa_usec_t latency) 
 
     if (s->flags & PA_SOURCE_DYNAMIC_LATENCY) {
         pa_assert(latency == 0);
+        s->thread_info.fixed_latency = 0;
+
         return;
     }
 
@@ -2802,7 +2823,7 @@ pa_bool_t pa_source_check_format(pa_source *s, pa_format_info *f)
             }
         }
 
-        pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
     }
 
     return ret;
@@ -2832,7 +2853,7 @@ pa_idxset* pa_source_check_formats(pa_source *s, pa_idxset *in_formats) {
 
 done:
     if (source_formats)
-        pa_idxset_free(source_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(source_formats, (pa_free_cb_t) pa_format_info_free);
 
     return out_formats;
 }

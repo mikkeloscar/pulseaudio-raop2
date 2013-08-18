@@ -64,15 +64,16 @@ struct pa_resampler {
     size_t remap_buf_size;
     unsigned resample_buf_samples;
     unsigned from_work_format_buf_samples;
-    pa_bool_t remap_buf_contains_leftover_data;
+    bool remap_buf_contains_leftover_data;
 
     pa_sample_format_t work_format;
+    uint8_t work_channels;
 
     pa_convert_func_t to_work_format_func;
     pa_convert_func_t from_work_format_func;
 
     pa_remap_t remap;
-    pa_bool_t map_required;
+    bool map_required;
 
     void (*impl_free)(pa_resampler *r);
     void (*impl_update_rates)(pa_resampler *r);
@@ -235,9 +236,12 @@ pa_resampler* pa_resampler_new(
 
     if (method == PA_RESAMPLER_AUTO) {
 #ifdef HAVE_SPEEX
-        method = PA_RESAMPLER_SPEEX_FLOAT_BASE + 3;
+        method = PA_RESAMPLER_SPEEX_FLOAT_BASE + 1;
 #else
-        method = PA_RESAMPLER_FFMPEG;
+        if (flags & PA_RESAMPLER_VARIABLE_RATE)
+            method = PA_RESAMPLER_TRIVIAL;
+        else
+            method = PA_RESAMPLER_FFMPEG;
 #endif
     }
 
@@ -279,7 +283,9 @@ pa_resampler* pa_resampler_new(
 
         if (r->map_required || a->format != b->format || method == PA_RESAMPLER_PEAKS) {
 
-            if (a->format == PA_SAMPLE_S32NE || a->format == PA_SAMPLE_S32RE ||
+            if (a->format == PA_SAMPLE_S16NE || b->format == PA_SAMPLE_S16NE)
+                r->work_format = PA_SAMPLE_S16NE;
+            else if (a->format == PA_SAMPLE_S32NE || a->format == PA_SAMPLE_S32RE ||
                 a->format == PA_SAMPLE_FLOAT32NE || a->format == PA_SAMPLE_FLOAT32RE ||
                 a->format == PA_SAMPLE_S24NE || a->format == PA_SAMPLE_S24RE ||
                 a->format == PA_SAMPLE_S24_32NE || a->format == PA_SAMPLE_S24_32RE ||
@@ -322,6 +328,16 @@ pa_resampler* pa_resampler_new(
                 goto fail;
         }
     }
+
+    if (r->o_ss.channels <= r->i_ss.channels)
+        r->work_channels = r->o_ss.channels;
+    else
+        r->work_channels = r->i_ss.channels;
+
+    pa_log_debug("Resampler:\n  rate %d -> %d (method %s),\n  format %s -> %s (intermediate %s),\n  channels %d -> %d (resampling %d)",
+        a->rate, b->rate, pa_resample_method_to_string(r->method),
+        pa_sample_format_to_string(a->format), pa_sample_format_to_string(b->format), pa_sample_format_to_string(r->work_format),
+        a->channels, b->channels, r->work_channels);
 
     /* initialize implementation */
     if (init_table[method](r) < 0)
@@ -389,7 +405,7 @@ size_t pa_resampler_request(pa_resampler *r, size_t out_length) {
      * loops. When the leftover is ignored here, such loops would eventually
      * terminate, because the leftover would grow each round, finally
      * surpassing the minimum input threshold of the resampler. */
-    return (((((out_length + r->o_fz-1) / r->o_fz) * r->i_ss.rate) + r->o_ss.rate-1) / r->o_ss.rate) * r->i_fz;
+    return ((((uint64_t) ((out_length + r->o_fz-1) / r->o_fz) * r->i_ss.rate) + r->o_ss.rate-1) / r->o_ss.rate) * r->i_fz;
 }
 
 size_t pa_resampler_result(pa_resampler *r, size_t in_length) {
@@ -405,7 +421,7 @@ size_t pa_resampler_result(pa_resampler *r, size_t in_length) {
     if (r->remap_buf_contains_leftover_data)
         frames += r->remap_buf.length / (r->w_sz * r->o_ss.channels);
 
-    return ((frames * r->o_ss.rate + r->i_ss.rate - 1) / r->i_ss.rate) * r->o_fz;
+    return (((uint64_t) frames * r->o_ss.rate + r->i_ss.rate - 1) / r->i_ss.rate) * r->o_fz;
 }
 
 size_t pa_resampler_max_block_size(pa_resampler *r) {
@@ -434,7 +450,7 @@ size_t pa_resampler_max_block_size(pa_resampler *r) {
     if (r->remap_buf_contains_leftover_data)
         frames -= r->remap_buf.length / (r->w_sz * r->o_ss.channels);
 
-    return (frames * r->i_ss.rate / max_ss.rate) * r->i_fz;
+    return ((uint64_t) frames * r->i_ss.rate / max_ss.rate) * r->i_fz;
 }
 
 void pa_resampler_reset(pa_resampler *r) {
@@ -443,7 +459,7 @@ void pa_resampler_reset(pa_resampler *r) {
     if (r->impl_reset)
         r->impl_reset(r);
 
-    r->remap_buf_contains_leftover_data = FALSE;
+    r->remap_buf_contains_leftover_data = false;
 }
 
 pa_resample_method_t pa_resampler_get_method(pa_resampler *r) {
@@ -549,15 +565,15 @@ pa_resample_method_t pa_parse_resample_method(const char *string) {
             return m;
 
     if (pa_streq(string, "speex-fixed"))
-        return PA_RESAMPLER_SPEEX_FIXED_BASE + 3;
+        return PA_RESAMPLER_SPEEX_FIXED_BASE + 1;
 
     if (pa_streq(string, "speex-float"))
-        return PA_RESAMPLER_SPEEX_FLOAT_BASE + 3;
+        return PA_RESAMPLER_SPEEX_FLOAT_BASE + 1;
 
     return PA_RESAMPLER_INVALID;
 }
 
-static pa_bool_t on_left(pa_channel_position_t p) {
+static bool on_left(pa_channel_position_t p) {
 
     return
         p == PA_CHANNEL_POSITION_FRONT_LEFT ||
@@ -568,7 +584,7 @@ static pa_bool_t on_left(pa_channel_position_t p) {
         p == PA_CHANNEL_POSITION_TOP_REAR_LEFT;
 }
 
-static pa_bool_t on_right(pa_channel_position_t p) {
+static bool on_right(pa_channel_position_t p) {
 
     return
         p == PA_CHANNEL_POSITION_FRONT_RIGHT ||
@@ -579,7 +595,7 @@ static pa_bool_t on_right(pa_channel_position_t p) {
         p == PA_CHANNEL_POSITION_TOP_REAR_RIGHT;
 }
 
-static pa_bool_t on_center(pa_channel_position_t p) {
+static bool on_center(pa_channel_position_t p) {
 
     return
         p == PA_CHANNEL_POSITION_FRONT_CENTER ||
@@ -589,12 +605,12 @@ static pa_bool_t on_center(pa_channel_position_t p) {
         p == PA_CHANNEL_POSITION_TOP_REAR_CENTER;
 }
 
-static pa_bool_t on_lfe(pa_channel_position_t p) {
+static bool on_lfe(pa_channel_position_t p) {
     return
         p == PA_CHANNEL_POSITION_LFE;
 }
 
-static pa_bool_t on_front(pa_channel_position_t p) {
+static bool on_front(pa_channel_position_t p) {
     return
         p == PA_CHANNEL_POSITION_FRONT_LEFT ||
         p == PA_CHANNEL_POSITION_FRONT_RIGHT ||
@@ -606,7 +622,7 @@ static pa_bool_t on_front(pa_channel_position_t p) {
         p == PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER;
 }
 
-static pa_bool_t on_rear(pa_channel_position_t p) {
+static bool on_rear(pa_channel_position_t p) {
     return
         p == PA_CHANNEL_POSITION_REAR_LEFT ||
         p == PA_CHANNEL_POSITION_REAR_RIGHT ||
@@ -616,7 +632,7 @@ static pa_bool_t on_rear(pa_channel_position_t p) {
         p == PA_CHANNEL_POSITION_TOP_REAR_CENTER;
 }
 
-static pa_bool_t on_side(pa_channel_position_t p) {
+static bool on_side(pa_channel_position_t p) {
     return
         p == PA_CHANNEL_POSITION_SIDE_LEFT ||
         p == PA_CHANNEL_POSITION_SIDE_RIGHT ||
@@ -643,8 +659,8 @@ static int front_rear_side(pa_channel_position_t p) {
 static void calc_map_table(pa_resampler *r) {
     unsigned oc, ic;
     unsigned n_oc, n_ic;
-    pa_bool_t ic_connected[PA_CHANNELS_MAX];
-    pa_bool_t remix;
+    bool ic_connected[PA_CHANNELS_MAX];
+    bool remix;
     pa_strbuf *s;
     char *t;
     pa_remap_t *m;
@@ -663,228 +679,208 @@ static void calc_map_table(pa_resampler *r) {
     memset(m->map_table_i, 0, sizeof(m->map_table_i));
 
     memset(ic_connected, 0, sizeof(ic_connected));
-    remix = (r->flags & (PA_RESAMPLER_NO_REMAP|PA_RESAMPLER_NO_REMIX)) == 0;
+    remix = (r->flags & (PA_RESAMPLER_NO_REMAP | PA_RESAMPLER_NO_REMIX)) == 0;
 
-    for (oc = 0; oc < n_oc; oc++) {
-        pa_bool_t oc_connected = FALSE;
-        pa_channel_position_t b = r->o_cm.map[oc];
+    if (r->flags & PA_RESAMPLER_NO_REMAP) {
+        pa_assert(!remix);
 
-        for (ic = 0; ic < n_ic; ic++) {
-            pa_channel_position_t a = r->i_cm.map[ic];
+        for (oc = 0; oc < PA_MIN(n_ic, n_oc); oc++)
+            m->map_table_f[oc][oc] = 1.0f;
 
-            if (r->flags & PA_RESAMPLER_NO_REMAP) {
-                /* We shall not do any remapping. Hence, just check by index */
+    } else if (r->flags & PA_RESAMPLER_NO_REMIX) {
+        pa_assert(!remix);
+        for (oc = 0; oc < n_oc; oc++) {
+            pa_channel_position_t b = r->o_cm.map[oc];
 
-                if (ic == oc)
-                    m->map_table_f[oc][ic] = 1.0;
+            for (ic = 0; ic < n_ic; ic++) {
+                pa_channel_position_t a = r->i_cm.map[ic];
 
-                continue;
-            }
-
-            if (r->flags & PA_RESAMPLER_NO_REMIX) {
                 /* We shall not do any remixing. Hence, just check by name */
-
                 if (a == b)
-                    m->map_table_f[oc][ic] = 1.0;
-
-                continue;
-            }
-
-            pa_assert(remix);
-
-            /* OK, we shall do the full monty: upmixing and
-             * downmixing. Our algorithm is relatively simple, does
-             * not do spacialization, delay elements or apply lowpass
-             * filters for LFE. Patches are always welcome,
-             * though. Oh, and it doesn't do any matrix
-             * decoding. (Which probably wouldn't make any sense
-             * anyway.)
-             *
-             * This code is not idempotent: downmixing an upmixed
-             * stereo stream is not identical to the original. The
-             * volume will not match, and the two channels will be a
-             * linear combination of both.
-             *
-             * This is loosely based on random suggestions found on the
-             * Internet, such as this:
-             * http://www.halfgaar.net/surround-sound-in-linux and the
-             * alsa upmix plugin.
-             *
-             * The algorithm works basically like this:
-             *
-             * 1) Connect all channels with matching names.
-             *
-             * 2) Mono Handling:
-             *    S:Mono: Copy into all D:channels
-             *    D:Mono: Avg all S:channels
-             *
-             * 3) Mix D:Left, D:Right:
-             *    D:Left: If not connected, avg all S:Left
-             *    D:Right: If not connected, avg all S:Right
-             *
-             * 4) Mix D:Center
-             *       If not connected, avg all S:Center
-             *       If still not connected, avg all S:Left, S:Right
-             *
-             * 5) Mix D:LFE
-             *       If not connected, avg all S:*
-             *
-             * 6) Make sure S:Left/S:Right is used: S:Left/S:Right: If
-             *    not connected, mix into all D:left and all D:right
-             *    channels. Gain is 0.1, the current left and right
-             *    should be multiplied by 0.9.
-             *
-             * 7) Make sure S:Center, S:LFE is used:
-             *
-             *    S:Center, S:LFE: If not connected, mix into all
-             *    D:left, all D:right, all D:center channels, gain is
-             *    0.375. The current (as result of 1..6) factors
-             *    should be multiplied by 0.75. (Alt. suggestion: 0.25
-             *    vs. 0.5) If C-front is only mixed into
-             *    L-front/R-front if available, otherwise into all L/R
-             *    channels. Similarly for C-rear.
-             *
-             * S: and D: shall relate to the source resp. destination channels.
-             *
-             * Rationale: 1, 2 are probably obvious. For 3: this
-             * copies front to rear if needed. For 4: we try to find
-             * some suitable C source for C, if we don't find any, we
-             * avg L and R. For 5: LFE is mixed from all channels. For
-             * 6: the rear channels should not be dropped entirely,
-             * however have only minimal impact. For 7: movies usually
-             * encode speech on the center channel. Thus we have to
-             * make sure this channel is distributed to L and R if not
-             * available in the output. Also, LFE is used to achieve a
-             * greater dynamic range, and thus we should try to do our
-             * best to pass it to L+R.
-             */
-
-            if (a == b || a == PA_CHANNEL_POSITION_MONO) {
-                m->map_table_f[oc][ic] = 1.0;
-
-                oc_connected = TRUE;
-                ic_connected[ic] = TRUE;
-            }
-            else if (b == PA_CHANNEL_POSITION_MONO) {
-                if (n_ic)
-                    m->map_table_f[oc][ic] = 1.0f / (float) n_ic;
-
-                oc_connected = TRUE;
-                ic_connected[ic] = TRUE;
+                    m->map_table_f[oc][ic] = 1.0f;
             }
         }
+    } else {
 
-        if (!oc_connected && remix) {
-            /* OK, we shall remix */
+        /* OK, we shall do the full monty: upmixing and downmixing. Our
+         * algorithm is relatively simple, does not do spacialization, delay
+         * elements or apply lowpass filters for LFE. Patches are always
+         * welcome, though. Oh, and it doesn't do any matrix decoding. (Which
+         * probably wouldn't make any sense anyway.)
+         *
+         * This code is not idempotent: downmixing an upmixed stereo stream is
+         * not identical to the original. The volume will not match, and the
+         * two channels will be a linear combination of both.
+         *
+         * This is loosely based on random suggestions found on the Internet,
+         * such as this:
+         * http://www.halfgaar.net/surround-sound-in-linux and the alsa upmix
+         * plugin.
+         *
+         * The algorithm works basically like this:
+         *
+         * 1) Connect all channels with matching names.
+         *
+         * 2) Mono Handling:
+         *    S:Mono: Copy into all D:channels
+         *    D:Mono: Avg all S:channels
+         *
+         * 3) Mix D:Left, D:Right:
+         *    D:Left: If not connected, avg all S:Left
+         *    D:Right: If not connected, avg all S:Right
+         *
+         * 4) Mix D:Center
+         *    If not connected, avg all S:Center
+         *    If still not connected, avg all S:Left, S:Right
+         *
+         * 5) Mix D:LFE
+         *    If not connected, avg all S:*
+         *
+         * 6) Make sure S:Left/S:Right is used: S:Left/S:Right: If not
+         *    connected, mix into all D:left and all D:right channels. Gain is
+         *    1/9.
+         *
+         * 7) Make sure S:Center, S:LFE is used:
+         *
+         *    S:Center, S:LFE: If not connected, mix into all D:left, all
+         *    D:right, all D:center channels. Gain is 0.5 for center and 0.375
+         *    for LFE. C-front is only mixed into L-front/R-front if available,
+         *    otherwise into all L/R channels. Similarly for C-rear.
+         *
+         * 8) Normalize each row in the matrix such that the sum for each row is
+         *    not larger than 1.0 in order to avoid clipping.
+         *
+         * S: and D: shall relate to the source resp. destination channels.
+         *
+         * Rationale: 1, 2 are probably obvious. For 3: this copies front to
+         * rear if needed. For 4: we try to find some suitable C source for C,
+         * if we don't find any, we avg L and R. For 5: LFE is mixed from all
+         * channels. For 6: the rear channels should not be dropped entirely,
+         * however have only minimal impact. For 7: movies usually encode
+         * speech on the center channel. Thus we have to make sure this channel
+         * is distributed to L and R if not available in the output. Also, LFE
+         * is used to achieve a greater dynamic range, and thus we should try
+         * to do our best to pass it to L+R.
+         */
 
-            /* Try to find matching input ports for this output port */
-
-            if (on_left(b)) {
-                unsigned n = 0;
-
-                /* We are not connected and on the left side, let's
-                 * average all left side input channels. */
-
-                for (ic = 0; ic < n_ic; ic++)
-                    if (on_left(r->i_cm.map[ic]))
-                        n++;
-
-                if (n > 0)
-                    for (ic = 0; ic < n_ic; ic++)
-                        if (on_left(r->i_cm.map[ic])) {
-                            m->map_table_f[oc][ic] = 1.0f / (float) n;
-                            ic_connected[ic] = TRUE;
-                        }
-
-                /* We ignore the case where there is no left input
-                 * channel. Something is really wrong in this case
-                 * anyway. */
-
-            } else if (on_right(b)) {
-                unsigned n = 0;
-
-                /* We are not connected and on the right side, let's
-                 * average all right side input channels. */
-
-                for (ic = 0; ic < n_ic; ic++)
-                    if (on_right(r->i_cm.map[ic]))
-                        n++;
-
-                if (n > 0)
-                    for (ic = 0; ic < n_ic; ic++)
-                        if (on_right(r->i_cm.map[ic])) {
-                            m->map_table_f[oc][ic] = 1.0f / (float) n;
-                            ic_connected[ic] = TRUE;
-                        }
-
-                /* We ignore the case where there is no right input
-                 * channel. Something is really wrong in this case
-                 * anyway. */
-
-            } else if (on_center(b)) {
-                unsigned n = 0;
-
-                /* We are not connected and at the center. Let's
-                 * average all center input channels. */
-
-                for (ic = 0; ic < n_ic; ic++)
-                    if (on_center(r->i_cm.map[ic]))
-                        n++;
-
-                if (n > 0) {
-                    for (ic = 0; ic < n_ic; ic++)
-                        if (on_center(r->i_cm.map[ic])) {
-                            m->map_table_f[oc][ic] = 1.0f / (float) n;
-                            ic_connected[ic] = TRUE;
-                        }
-                } else {
-
-                    /* Hmm, no center channel around, let's synthesize
-                     * it by mixing L and R.*/
-
-                    n = 0;
-
-                    for (ic = 0; ic < n_ic; ic++)
-                        if (on_left(r->i_cm.map[ic]) || on_right(r->i_cm.map[ic]))
-                            n++;
-
-                    if (n > 0)
-                        for (ic = 0; ic < n_ic; ic++)
-                            if (on_left(r->i_cm.map[ic]) || on_right(r->i_cm.map[ic])) {
-                                m->map_table_f[oc][ic] = 1.0f / (float) n;
-                                ic_connected[ic] = TRUE;
-                            }
-
-                    /* We ignore the case where there is not even a
-                     * left or right input channel. Something is
-                     * really wrong in this case anyway. */
-                }
-
-            } else if (on_lfe(b)) {
-
-                /* We are not connected and an LFE. Let's average all
-                 * channels for LFE. */
-
-                for (ic = 0; ic < n_ic; ic++) {
-
-                    if (!(r->flags & PA_RESAMPLER_NO_LFE))
-                        m->map_table_f[oc][ic] = 1.0f / (float) n_ic;
-                    else
-                        m->map_table_f[oc][ic] = 0;
-
-                    /* Please note that a channel connected to LFE
-                     * doesn't really count as connected. */
-                }
-            }
-        }
-    }
-
-    if (remix) {
         unsigned
+            ic_left = 0,
+            ic_right = 0,
+            ic_center = 0,
             ic_unconnected_left = 0,
             ic_unconnected_right = 0,
             ic_unconnected_center = 0,
             ic_unconnected_lfe = 0;
+        bool ic_unconnected_center_mixed_in = 0;
+
+        pa_assert(remix);
+
+        for (ic = 0; ic < n_ic; ic++) {
+            if (on_left(r->i_cm.map[ic]))
+                ic_left++;
+            if (on_right(r->i_cm.map[ic]))
+                ic_right++;
+            if (on_center(r->i_cm.map[ic]))
+                ic_center++;
+        }
+
+        for (oc = 0; oc < n_oc; oc++) {
+            bool oc_connected = false;
+            pa_channel_position_t b = r->o_cm.map[oc];
+
+            for (ic = 0; ic < n_ic; ic++) {
+                pa_channel_position_t a = r->i_cm.map[ic];
+
+                if (a == b || a == PA_CHANNEL_POSITION_MONO) {
+                    m->map_table_f[oc][ic] = 1.0f;
+
+                    oc_connected = true;
+                    ic_connected[ic] = true;
+                }
+                else if (b == PA_CHANNEL_POSITION_MONO) {
+                    m->map_table_f[oc][ic] = 1.0f / (float) n_ic;
+
+                    oc_connected = true;
+                    ic_connected[ic] = true;
+                }
+            }
+
+            if (!oc_connected) {
+                /* Try to find matching input ports for this output port */
+
+                if (on_left(b)) {
+
+                    /* We are not connected and on the left side, let's
+                     * average all left side input channels. */
+
+                    if (ic_left > 0)
+                        for (ic = 0; ic < n_ic; ic++)
+                            if (on_left(r->i_cm.map[ic])) {
+                                m->map_table_f[oc][ic] = 1.0f / (float) ic_left;
+                                ic_connected[ic] = true;
+                            }
+
+                    /* We ignore the case where there is no left input channel.
+                     * Something is really wrong in this case anyway. */
+
+                } else if (on_right(b)) {
+
+                    /* We are not connected and on the right side, let's
+                     * average all right side input channels. */
+
+                    if (ic_right > 0)
+                        for (ic = 0; ic < n_ic; ic++)
+                            if (on_right(r->i_cm.map[ic])) {
+                                m->map_table_f[oc][ic] = 1.0f / (float) ic_right;
+                                ic_connected[ic] = true;
+                            }
+
+                    /* We ignore the case where there is no right input
+                     * channel. Something is really wrong in this case anyway.
+                     * */
+
+                } else if (on_center(b)) {
+
+                    if (ic_center > 0) {
+
+                        /* We are not connected and at the center. Let's average
+                         * all center input channels. */
+
+                        for (ic = 0; ic < n_ic; ic++)
+                            if (on_center(r->i_cm.map[ic])) {
+                                m->map_table_f[oc][ic] = 1.0f / (float) ic_center;
+                                ic_connected[ic] = true;
+                            }
+
+                    } else if (ic_left + ic_right > 0) {
+
+                        /* Hmm, no center channel around, let's synthesize it
+                         * by mixing L and R.*/
+
+                        for (ic = 0; ic < n_ic; ic++)
+                            if (on_left(r->i_cm.map[ic]) || on_right(r->i_cm.map[ic])) {
+                                m->map_table_f[oc][ic] = 1.0f / (float) (ic_left + ic_right);
+                                ic_connected[ic] = true;
+                            }
+                    }
+
+                    /* We ignore the case where there is not even a left or
+                     * right input channel. Something is really wrong in this
+                     * case anyway. */
+
+                } else if (on_lfe(b) && !(r->flags & PA_RESAMPLER_NO_LFE)) {
+
+                    /* We are not connected and an LFE. Let's average all
+                     * channels for LFE. */
+
+                    for (ic = 0; ic < n_ic; ic++)
+                        m->map_table_f[oc][ic] = 1.0f / (float) n_ic;
+
+                    /* Please note that a channel connected to LFE doesn't
+                     * really count as connected. */
+                }
+            }
+        }
 
         for (ic = 0; ic < n_ic; ic++) {
             pa_channel_position_t a = r->i_cm.map[ic];
@@ -902,121 +898,57 @@ static void calc_map_table(pa_resampler *r) {
                 ic_unconnected_lfe++;
         }
 
-        if (ic_unconnected_left > 0) {
+        for (ic = 0; ic < n_ic; ic++) {
+            pa_channel_position_t a = r->i_cm.map[ic];
 
-            /* OK, so there are unconnected input channels on the
-             * left. Let's multiply all already connected channels on
-             * the left side by .9 and add in our averaged unconnected
-             * channels multiplied by .1 */
+            if (ic_connected[ic])
+                continue;
 
             for (oc = 0; oc < n_oc; oc++) {
+                pa_channel_position_t b = r->o_cm.map[oc];
 
-                if (!on_left(r->o_cm.map[oc]))
-                    continue;
+                if (on_left(a) && on_left(b))
+                    m->map_table_f[oc][ic] = (1.f/9.f) / (float) ic_unconnected_left;
 
-                for (ic = 0; ic < n_ic; ic++) {
+                else if (on_right(a) && on_right(b))
+                    m->map_table_f[oc][ic] = (1.f/9.f) / (float) ic_unconnected_right;
 
-                    if (ic_connected[ic]) {
-                        m->map_table_f[oc][ic] *= .9f;
-                        continue;
-                    }
+                else if (on_center(a) && on_center(b)) {
+                    m->map_table_f[oc][ic] = (1.f/9.f) / (float) ic_unconnected_center;
+                    ic_unconnected_center_mixed_in = true;
 
-                    if (on_left(r->i_cm.map[ic]))
-                        m->map_table_f[oc][ic] = .1f / (float) ic_unconnected_left;
-                }
+                } else if (on_lfe(a) && !(r->flags & PA_RESAMPLER_NO_LFE))
+                    m->map_table_f[oc][ic] = .375f / (float) ic_unconnected_lfe;
             }
         }
 
-        if (ic_unconnected_right > 0) {
+        if (ic_unconnected_center > 0 && !ic_unconnected_center_mixed_in) {
+            unsigned ncenter[PA_CHANNELS_MAX];
+            bool found_frs[PA_CHANNELS_MAX];
 
-            /* OK, so there are unconnected input channels on the
-             * right. Let's multiply all already connected channels on
-             * the right side by .9 and add in our averaged unconnected
-             * channels multiplied by .1 */
+            memset(ncenter, 0, sizeof(ncenter));
+            memset(found_frs, 0, sizeof(found_frs));
 
-            for (oc = 0; oc < n_oc; oc++) {
+            /* Hmm, as it appears there was no center channel we
+               could mix our center channel in. In this case, mix it into
+               left and right. Using .5 as the factor. */
 
-                if (!on_right(r->o_cm.map[oc]))
+            for (ic = 0; ic < n_ic; ic++) {
+
+                if (ic_connected[ic])
                     continue;
 
-                for (ic = 0; ic < n_ic; ic++) {
-
-                    if (ic_connected[ic]) {
-                        m->map_table_f[oc][ic] *= .9f;
-                        continue;
-                    }
-
-                    if (on_right(r->i_cm.map[ic]))
-                        m->map_table_f[oc][ic] = .1f / (float) ic_unconnected_right;
-                }
-            }
-        }
-
-        if (ic_unconnected_center > 0) {
-            pa_bool_t mixed_in = FALSE;
-
-            /* OK, so there are unconnected input channels on the
-             * center. Let's multiply all already connected channels on
-             * the center side by .9 and add in our averaged unconnected
-             * channels multiplied by .1 */
-
-            for (oc = 0; oc < n_oc; oc++) {
-
-                if (!on_center(r->o_cm.map[oc]))
+                if (!on_center(r->i_cm.map[ic]))
                     continue;
 
-                for (ic = 0; ic < n_ic; ic++) {
+                for (oc = 0; oc < n_oc; oc++) {
 
-                    if (ic_connected[ic]) {
-                        m->map_table_f[oc][ic] *= .9f;
-                        continue;
-                    }
-
-                    if (on_center(r->i_cm.map[ic])) {
-                        m->map_table_f[oc][ic] = .1f / (float) ic_unconnected_center;
-                        mixed_in = TRUE;
-                    }
-                }
-            }
-
-            if (!mixed_in) {
-                unsigned ncenter[PA_CHANNELS_MAX];
-                pa_bool_t found_frs[PA_CHANNELS_MAX];
-
-                memset(ncenter, 0, sizeof(ncenter));
-                memset(found_frs, 0, sizeof(found_frs));
-
-                /* Hmm, as it appears there was no center channel we
-                   could mix our center channel in. In this case, mix
-                   it into left and right. Using .375 and 0.75 as
-                   factors. */
-
-                for (ic = 0; ic < n_ic; ic++) {
-
-                    if (ic_connected[ic])
+                    if (!on_left(r->o_cm.map[oc]) && !on_right(r->o_cm.map[oc]))
                         continue;
 
-                    if (!on_center(r->i_cm.map[ic]))
-                        continue;
-
-                    for (oc = 0; oc < n_oc; oc++) {
-
-                        if (!on_left(r->o_cm.map[oc]) && !on_right(r->o_cm.map[oc]))
-                            continue;
-
-                        if (front_rear_side(r->i_cm.map[ic]) == front_rear_side(r->o_cm.map[oc])) {
-                            found_frs[ic] = TRUE;
-                            break;
-                        }
-                    }
-
-                    for (oc = 0; oc < n_oc; oc++) {
-
-                        if (!on_left(r->o_cm.map[oc]) && !on_right(r->o_cm.map[oc]))
-                            continue;
-
-                        if (!found_frs[ic] || front_rear_side(r->i_cm.map[ic]) == front_rear_side(r->o_cm.map[oc]))
-                            ncenter[oc]++;
+                    if (front_rear_side(r->i_cm.map[ic]) == front_rear_side(r->o_cm.map[oc])) {
+                        found_frs[ic] = true;
+                        break;
                     }
                 }
 
@@ -1025,41 +957,41 @@ static void calc_map_table(pa_resampler *r) {
                     if (!on_left(r->o_cm.map[oc]) && !on_right(r->o_cm.map[oc]))
                         continue;
 
-                    if (ncenter[oc] <= 0)
+                    if (!found_frs[ic] || front_rear_side(r->i_cm.map[ic]) == front_rear_side(r->o_cm.map[oc]))
+                        ncenter[oc]++;
+                }
+            }
+
+            for (oc = 0; oc < n_oc; oc++) {
+
+                if (!on_left(r->o_cm.map[oc]) && !on_right(r->o_cm.map[oc]))
+                    continue;
+
+                if (ncenter[oc] <= 0)
+                    continue;
+
+                for (ic = 0; ic < n_ic; ic++) {
+
+                    if (!on_center(r->i_cm.map[ic]))
                         continue;
 
-                    for (ic = 0; ic < n_ic; ic++) {
-
-                        if (ic_connected[ic]) {
-                            m->map_table_f[oc][ic] *= .75f;
-                            continue;
-                        }
-
-                        if (!on_center(r->i_cm.map[ic]))
-                            continue;
-
-                        if (!found_frs[ic] || front_rear_side(r->i_cm.map[ic]) == front_rear_side(r->o_cm.map[oc]))
-                            m->map_table_f[oc][ic] = .375f / (float) ncenter[oc];
-                    }
+                    if (!found_frs[ic] || front_rear_side(r->i_cm.map[ic]) == front_rear_side(r->o_cm.map[oc]))
+                        m->map_table_f[oc][ic] = .5f / (float) ncenter[oc];
                 }
             }
         }
-
-        if (ic_unconnected_lfe > 0 && !(r->flags & PA_RESAMPLER_NO_LFE)) {
-
-            /* OK, so there is an unconnected LFE channel. Let's mix
-             * it into all channels, with factor 0.375 */
-
-            for (ic = 0; ic < n_ic; ic++) {
-
-                if (!on_lfe(r->i_cm.map[ic]))
-                    continue;
-
-                for (oc = 0; oc < n_oc; oc++)
-                    m->map_table_f[oc][ic] = 0.375f / (float) ic_unconnected_lfe;
-            }
-        }
     }
+
+    for (oc = 0; oc < n_oc; oc++) {
+        float sum = 0.0f;
+        for (ic = 0; ic < n_ic; ic++)
+            sum += m->map_table_f[oc][ic];
+
+        if (sum > 1.0f)
+            for (ic = 0; ic < n_ic; ic++)
+                m->map_table_f[oc][ic] /= sum;
+    }
+
     /* make an 16:16 int version of the matrix */
     for (oc = 0; oc < n_oc; oc++)
         for (ic = 0; ic < n_ic; ic++)
@@ -1134,7 +1066,7 @@ static pa_memchunk *remap_channels(pa_resampler *r, pa_memchunk *input) {
     unsigned in_n_samples, out_n_samples, in_n_frames, out_n_frames;
     void *src, *dst;
     size_t leftover_length = 0;
-    pa_bool_t have_leftover;
+    bool have_leftover;
 
     pa_assert(r);
     pa_assert(input);
@@ -1145,7 +1077,7 @@ static pa_memchunk *remap_channels(pa_resampler *r, pa_memchunk *input) {
      * remapped, so it's not part of the input, it's part of the output. */
 
     have_leftover = r->remap_buf_contains_leftover_data;
-    r->remap_buf_contains_leftover_data = FALSE;
+    r->remap_buf_contains_leftover_data = false;
 
     if (!have_leftover && (!r->map_required || input->length <= 0))
         return input;
@@ -1219,10 +1151,10 @@ static pa_memchunk *resample(pa_resampler *r, pa_memchunk *input) {
         return input;
 
     in_n_samples = (unsigned) (input->length / r->w_sz);
-    in_n_frames = (unsigned) (in_n_samples / r->o_ss.channels);
+    in_n_frames = (unsigned) (in_n_samples / r->work_channels);
 
     out_n_frames = ((in_n_frames*r->o_ss.rate)/r->i_ss.rate)+EXTRA_FRAMES;
-    out_n_samples = out_n_frames * r->o_ss.channels;
+    out_n_samples = out_n_frames * r->work_channels;
 
     r->resample_buf.index = 0;
     r->resample_buf.length = r->w_sz * out_n_samples;
@@ -1236,7 +1168,7 @@ static pa_memchunk *resample(pa_resampler *r, pa_memchunk *input) {
     }
 
     r->impl_resample(r, input, in_n_frames, &r->resample_buf, &out_n_frames);
-    r->resample_buf.length = out_n_frames * r->w_sz * r->o_ss.channels;
+    r->resample_buf.length = out_n_frames * r->w_sz * r->work_channels;
 
     return &r->resample_buf;
 }
@@ -1274,8 +1206,6 @@ static pa_memchunk *convert_from_work_format(pa_resampler *r, pa_memchunk *input
     pa_memblock_release(input->memblock);
     pa_memblock_release(r->from_work_format_buf.memblock);
 
-    r->from_work_format_buf.length = r->o_fz * n_frames;
-
     return &r->from_work_format_buf;
 }
 
@@ -1291,8 +1221,15 @@ void pa_resampler_run(pa_resampler *r, const pa_memchunk *in, pa_memchunk *out) 
 
     buf = (pa_memchunk*) in;
     buf = convert_to_work_format(r, buf);
-    buf = remap_channels(r, buf);
-    buf = resample(r, buf);
+    /* Try to save resampling effort: if we have more output channels than
+     * input channels, do resampling first, then remapping. */
+    if (r->o_ss.channels <= r->i_ss.channels) {
+        buf = remap_channels(r, buf);
+        buf = resample(r, buf);
+    } else {
+        buf = resample(r, buf);
+        buf = remap_channels(r, buf);
+    }
 
     if (buf->length) {
         buf = convert_from_work_format(r, buf);
@@ -1329,7 +1266,7 @@ static void save_leftover(pa_resampler *r, void *buf, size_t len) {
     memcpy(dst, buf, r->remap_buf.length);
     pa_memblock_release(r->remap_buf.memblock);
 
-    r->remap_buf_contains_leftover_data = TRUE;
+    r->remap_buf_contains_leftover_data = true;
 }
 
 /*** libsamplerate based implementation ***/
@@ -1357,8 +1294,8 @@ static void libsamplerate_resample(pa_resampler *r, const pa_memchunk *input, un
     pa_assert_se(src_process(r->src.state, &data) == 0);
 
     if (data.input_frames_used < in_n_frames) {
-        void *leftover_data = data.data_in + data.input_frames_used * r->o_ss.channels;
-        size_t leftover_length = (in_n_frames - data.input_frames_used) * sizeof(float) * r->o_ss.channels;
+        void *leftover_data = data.data_in + data.input_frames_used * r->work_channels;
+        size_t leftover_length = (in_n_frames - data.input_frames_used) * sizeof(float) * r->work_channels;
 
         save_leftover(r, leftover_data, leftover_length);
     }
@@ -1494,7 +1431,7 @@ static int speex_init(pa_resampler *r) {
 
     pa_log_info("Choosing speex quality setting %i.", q);
 
-    if (!(r->speex.state = speex_resampler_init(r->o_ss.channels, r->i_ss.rate, r->o_ss.rate, q, &err)))
+    if (!(r->speex.state = speex_resampler_init(r->work_channels, r->i_ss.rate, r->o_ss.rate, q, &err)))
         return -1;
 
     return 0;
@@ -1513,13 +1450,13 @@ static void trivial_resample(pa_resampler *r, const pa_memchunk *input, unsigned
     pa_assert(output);
     pa_assert(out_n_frames);
 
-    fz = r->w_sz * r->o_ss.channels;
+    fz = r->w_sz * r->work_channels;
 
     src = pa_memblock_acquire_chunk(input);
     dst = pa_memblock_acquire_chunk(output);
 
     for (o_index = 0;; o_index++, r->trivial.o_counter++) {
-        i_index = (r->trivial.o_counter * r->i_ss.rate) / r->o_ss.rate;
+        i_index = ((uint64_t) r->trivial.o_counter * r->i_ss.rate) / r->o_ss.rate;
         i_index = i_index > r->trivial.i_counter ? i_index - r->trivial.i_counter : 0;
 
         if (i_index >= in_n_frames)
@@ -1580,11 +1517,11 @@ static void peaks_resample(pa_resampler *r, const pa_memchunk *input, unsigned i
     src = pa_memblock_acquire_chunk(input);
     dst = pa_memblock_acquire_chunk(output);
 
-    i = (r->peaks.o_counter * r->i_ss.rate) / r->o_ss.rate;
+    i = ((uint64_t) r->peaks.o_counter * r->i_ss.rate) / r->o_ss.rate;
     i = i > r->peaks.i_counter ? i - r->peaks.i_counter : 0;
 
     while (i_end < in_n_frames) {
-        i_end = ((r->peaks.o_counter+1) * r->i_ss.rate) / r->o_ss.rate;
+        i_end = ((uint64_t) (r->peaks.o_counter + 1) * r->i_ss.rate) / r->o_ss.rate;
         i_end = i_end > r->peaks.i_counter ? i_end - r->peaks.i_counter : 0;
 
         pa_assert_fp(o_index * r->w_sz * r->o_ss.channels < pa_memblock_get_length(output->memblock));
@@ -1697,7 +1634,7 @@ static void ffmpeg_resample(pa_resampler *r, const pa_memchunk *input, unsigned 
     pa_assert(output);
     pa_assert(out_n_frames);
 
-    for (c = 0; c < r->o_ss.channels; c++) {
+    for (c = 0; c < r->work_channels; c++) {
         unsigned u;
         pa_memblock *b, *w;
         int16_t *p, *t, *k, *q, *s;
@@ -1712,7 +1649,7 @@ static void ffmpeg_resample(pa_resampler *r, const pa_memchunk *input, unsigned 
         k = p;
         for (u = 0; u < in_n_frames; u++) {
             *k = *t;
-            t += r->o_ss.channels;
+            t += r->work_channels;
             k ++;
         }
         pa_memblock_release(input->memblock);
@@ -1726,7 +1663,7 @@ static void ffmpeg_resample(pa_resampler *r, const pa_memchunk *input, unsigned 
                                              q, p,
                                              &consumed_frames,
                                              (int) in_n_frames, (int) *out_n_frames,
-                                             c >= (unsigned) (r->o_ss.channels-1));
+                                             c >= (unsigned) (r->work_channels-1));
 
         pa_memblock_release(b);
         pa_memblock_unref(b);
@@ -1740,7 +1677,7 @@ static void ffmpeg_resample(pa_resampler *r, const pa_memchunk *input, unsigned 
         for (u = 0; u < used_frames; u++) {
             *s = *q;
             q++;
-            s += r->o_ss.channels;
+            s += r->work_channels;
         }
         pa_memblock_release(output->memblock);
         pa_memblock_release(w);

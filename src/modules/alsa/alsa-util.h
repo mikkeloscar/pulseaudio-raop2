@@ -125,7 +125,7 @@ int pa_alsa_recover_from_poll(snd_pcm_t *pcm, int revents);
 pa_rtpoll_item* pa_alsa_build_pollfd(snd_pcm_t *pcm, pa_rtpoll *rtpoll);
 
 snd_pcm_sframes_t pa_alsa_safe_avail(snd_pcm_t *pcm, size_t hwbuf_size, const pa_sample_spec *ss);
-int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_sframes_t *delay, size_t hwbuf_size, const pa_sample_spec *ss, pa_bool_t capture);
+int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_status_t *status, snd_pcm_sframes_t *delay, size_t hwbuf_size, const pa_sample_spec *ss, pa_bool_t capture);
 int pa_alsa_safe_mmap_begin(snd_pcm_t *pcm, const snd_pcm_channel_area_t **areas, snd_pcm_uframes_t *offset, snd_pcm_uframes_t *frames, size_t hwbuf_size, const pa_sample_spec *ss);
 
 char *pa_alsa_get_driver_name(int card);
@@ -133,7 +133,7 @@ char *pa_alsa_get_driver_name_by_pcm(snd_pcm_t *pcm);
 
 char *pa_alsa_get_reserve_name(const char *device);
 
-unsigned int *pa_alsa_get_supported_rates(snd_pcm_t *pcm);
+unsigned int *pa_alsa_get_supported_rates(snd_pcm_t *pcm, unsigned int fallback_rate);
 
 pa_bool_t pa_alsa_pcm_is_hw(snd_pcm_t *pcm);
 pa_bool_t pa_alsa_pcm_is_modem(snd_pcm_t *pcm);
@@ -143,7 +143,15 @@ const char* pa_alsa_strerror(int errnum);
 pa_bool_t pa_alsa_may_tsched(pa_bool_t want);
 
 snd_hctl_elem_t* pa_alsa_find_jack(snd_hctl_t *hctl, const char* jack_name);
+snd_hctl_elem_t* pa_alsa_find_eld_ctl(snd_hctl_t *hctl, int device);
 
 snd_mixer_t *pa_alsa_open_mixer(int alsa_card_index, char **ctl_device, snd_hctl_t **hctl);
+
+typedef struct pa_hdmi_eld pa_hdmi_eld;
+struct pa_hdmi_eld {
+    char monitor_name[17];
+};
+
+int pa_alsa_get_hdmi_eld(snd_hctl_t *hctl, int device, pa_hdmi_eld *eld);
 
 #endif

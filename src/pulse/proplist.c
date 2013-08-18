@@ -70,8 +70,7 @@ pa_proplist* pa_proplist_new(void) {
 void pa_proplist_free(pa_proplist* p) {
     pa_assert(p);
 
-    pa_proplist_clear(p);
-    pa_hashmap_free(MAKE_HASHMAP(p), NULL, NULL);
+    pa_hashmap_free(MAKE_HASHMAP(p), (pa_free_cb_t) property_free);
 }
 
 /** Will accept only valid UTF-8 */
@@ -653,11 +652,9 @@ int pa_proplist_contains(pa_proplist *p, const char *key) {
 }
 
 void pa_proplist_clear(pa_proplist *p) {
-    struct property *prop;
     pa_assert(p);
 
-    while ((prop = pa_hashmap_steal_first(MAKE_HASHMAP(p))))
-        property_free(prop);
+    pa_hashmap_remove_all(MAKE_HASHMAP(p), (pa_free_cb_t) property_free);
 }
 
 pa_proplist* pa_proplist_copy(const pa_proplist *p) {

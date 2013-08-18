@@ -949,11 +949,16 @@ static int esd_proto_standby_or_resume(connection *c, esd_proto_t request, const
     connection_write_prepare(c, sizeof(int32_t) * 2);
     connection_write(c, &ok, sizeof(int32_t));
 
-    if (request == ESD_PROTO_STANDBY)
-        ok = pa_sink_suspend_all(c->protocol->core, TRUE, PA_SUSPEND_USER) >= 0;
-    else {
+    pa_log_debug("%s of all sinks and sources requested by client %" PRIu32 ".",
+                 request == ESD_PROTO_STANDBY ? "Suspending" : "Resuming", c->client->index);
+
+    if (request == ESD_PROTO_STANDBY) {
+        ok = pa_sink_suspend_all(c->protocol->core, true, PA_SUSPEND_USER) >= 0;
+        ok &= pa_source_suspend_all(c->protocol->core, true, PA_SUSPEND_USER) >= 0;
+    } else {
         pa_assert(request == ESD_PROTO_RESUME);
-        ok = pa_sink_suspend_all(c->protocol->core, FALSE, PA_SUSPEND_USER) >= 0;
+        ok = pa_sink_suspend_all(c->protocol->core, false, PA_SUSPEND_USER) >= 0;
+        ok &= pa_source_suspend_all(c->protocol->core, false, PA_SUSPEND_USER) >= 0;
     }
 
     connection_write(c, &ok, sizeof(int32_t));
@@ -1622,7 +1627,7 @@ void pa_esound_protocol_unref(pa_esound_protocol *p) {
     while ((c = pa_idxset_first(p->connections, NULL)))
         connection_unlink(c);
 
-    pa_idxset_free(p->connections, NULL, NULL);
+    pa_idxset_free(p->connections, NULL);
 
     pa_assert_se(pa_shared_remove(p->core, "esound-protocol") >= 0);
 

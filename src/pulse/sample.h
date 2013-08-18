@@ -112,11 +112,18 @@
 PA_C_DECL_BEGIN
 
 #if !defined(WORDS_BIGENDIAN)
+
 #if defined(__BYTE_ORDER)
 #if __BYTE_ORDER == __BIG_ENDIAN
 #define WORDS_BIGENDIAN
 #endif
 #endif
+
+/* On Sparc, WORDS_BIGENDIAN needs to be set if _BIG_ENDIAN is defined. */
+#ifdef _BIG_ENDIAN
+#define WORDS_BIGENDIAN
+#endif
+
 #endif
 
 /** Maximum number of allowed channels */
@@ -311,7 +318,7 @@ char* pa_sample_spec_snprint(char *s, size_t l, const pa_sample_spec *spec);
  * ABI. \since 0.9.16 */
 #define PA_BYTES_SNPRINT_MAX 11
 
-/** Pretty print a byte size value. (i.e. "2.5 MiB") */
+/** Pretty print a byte size value (i.e.\ "2.5 MiB") */
 char* pa_bytes_snprint(char *s, size_t l, unsigned v);
 
 /** Return 1 when the specified format is little endian, return -1

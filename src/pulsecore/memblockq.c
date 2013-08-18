@@ -76,11 +76,8 @@ pa_memblockq* pa_memblockq_new(
     pa_assert(sample_spec);
     pa_assert(name);
 
-    bq = pa_xnew(pa_memblockq, 1);
+    bq = pa_xnew0(pa_memblockq, 1);
     bq->name = pa_xstrdup(name);
-    bq->blocks = bq->blocks_tail = NULL;
-    bq->current_read = bq->current_write = NULL;
-    bq->n_blocks = 0;
 
     bq->sample_spec = *sample_spec;
     bq->base = pa_frame_size(sample_spec);
@@ -89,8 +86,6 @@ pa_memblockq* pa_memblockq_new(
     pa_log_debug("memblockq requested: maxlength=%lu, tlength=%lu, base=%lu, prebuf=%lu, minreq=%lu maxrewind=%lu",
                  (unsigned long) maxlength, (unsigned long) tlength, (unsigned long) bq->base, (unsigned long) prebuf, (unsigned long) minreq, (unsigned long) maxrewind);
 
-    bq->missing = bq->requested = 0;
-    bq->maxlength = bq->tlength = bq->prebuf = bq->minreq = bq->maxrewind = 0;
     bq->in_prebuf = TRUE;
 
     pa_memblockq_set_maxlength(bq, maxlength);
@@ -105,8 +100,7 @@ pa_memblockq* pa_memblockq_new(
     if (silence) {
         bq->silence = *silence;
         pa_memblock_ref(bq->silence.memblock);
-    } else
-        pa_memchunk_reset(&bq->silence);
+    }
 
     bq->mcalign = pa_mcalign_new(bq->base);
 
@@ -265,7 +259,7 @@ static void write_index_changed(pa_memblockq *bq, int64_t old_write_index, pa_bo
         bq->missing -= delta;
 
 #ifdef MEMBLOCKQ_DEBUG
-     pa_log("[%s] pushed/seeked %lli: requested counter at %lli, account=%i", bq->name, (long long) delta, (long long) bq->requested, account);
+     pa_log_debug("[%s] pushed/seeked %lli: requested counter at %lli, account=%i", bq->name, (long long) delta, (long long) bq->requested, account);
 #endif
 }
 
@@ -278,7 +272,7 @@ static void read_index_changed(pa_memblockq *bq, int64_t old_read_index) {
     bq->missing += delta;
 
 #ifdef MEMBLOCKQ_DEBUG
-    pa_log("[%s] popped %lli: missing counter at %lli", bq->name, (long long) delta, (long long) bq->missing);
+    pa_log_debug("[%s] popped %lli: missing counter at %lli", bq->name, (long long) delta, (long long) bq->missing);
 #endif
 }
 
@@ -293,8 +287,7 @@ int pa_memblockq_push(pa_memblockq* bq, const pa_memchunk *uchunk) {
     pa_assert(uchunk->length > 0);
     pa_assert(uchunk->index + uchunk->length <= pa_memblock_get_length(uchunk->memblock));
 
-    if (uchunk->length % bq->base)
-        return -1;
+    pa_assert_se(uchunk->length % bq->base == 0);
 
     if (!can_push(bq, uchunk->length))
         return -1;
@@ -839,7 +832,7 @@ size_t pa_memblockq_pop_missing(pa_memblockq *bq) {
     pa_assert(bq);
 
 #ifdef MEMBLOCKQ_DEBUG
-    pa_log("[%s] pop: %lli", bq->name, (long long) bq->missing);
+    pa_log_debug("[%s] pop: %lli", bq->name, (long long) bq->missing);
 #endif
 
     if (bq->missing <= 0)
@@ -851,7 +844,7 @@ size_t pa_memblockq_pop_missing(pa_memblockq *bq) {
     bq->missing = 0;
 
 #ifdef MEMBLOCKQ_DEBUG
-    pa_log("[%s] sent %lli: request counter is at %lli", bq->name, (long long) l, (long long) bq->requested);
+    pa_log_debug("[%s] sent %lli: request counter is at %lli", bq->name, (long long) l, (long long) bq->requested);
 #endif
 
     return l;
@@ -936,8 +929,8 @@ void pa_memblockq_apply_attr(pa_memblockq *bq, const pa_buffer_attr *a) {
 
     pa_memblockq_set_maxlength(bq, a->maxlength);
     pa_memblockq_set_tlength(bq, a->tlength);
-    pa_memblockq_set_prebuf(bq, a->prebuf);
     pa_memblockq_set_minreq(bq, a->minreq);
+    pa_memblockq_set_prebuf(bq, a->prebuf);
 }
 
 void pa_memblockq_get_attr(pa_memblockq *bq, pa_buffer_attr *a) {

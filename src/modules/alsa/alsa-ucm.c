@@ -247,7 +247,12 @@ static int ucm_get_device_property(
         }
     }
 
-    pa_assert(device->playback_channels || device->capture_channels);
+    if (device->playback_channels == 0 && device->capture_channels == 0) {
+        pa_log_warn("UCM file does not specify 'PlaybackChannels' or 'CaptureChannels'"
+                    "for device %s, assuming stereo duplex.", device_name);
+        device->playback_channels = 2;
+        device->capture_channels = 2;
+    }
 
     /* get priority of device */
     if (device->playback_channels) { /* sink device */
@@ -535,7 +540,7 @@ int pa_alsa_ucm_query_profiles(pa_alsa_ucm_config *ucm, int card_index)
 
     err = snd_use_case_mgr_open(&ucm->ucm_mgr, card_name);
     if (err < 0) {
-        pa_log("UCM not available for card %s", card_name);
+        pa_log_info("UCM not available for card %s", card_name);
         goto ucm_mgr_fail;
     }
 
@@ -1211,8 +1216,8 @@ static pa_alsa_jack* ucm_get_jack(pa_alsa_ucm_config *ucm, const char *dev_name,
             goto out;
 
     j = pa_xnew0(pa_alsa_jack, 1);
-    j->state_unplugged = PA_PORT_AVAILABLE_NO;
-    j->state_plugged = PA_PORT_AVAILABLE_YES;
+    j->state_unplugged = PA_AVAILABLE_NO;
+    j->state_plugged = PA_AVAILABLE_YES;
     j->name = pa_xstrdup(name);
     j->alsa_name = pa_sprintf_malloc("%s Jack", dev_name);
 
@@ -1493,9 +1498,9 @@ static void free_verb(pa_alsa_ucm_verb *verb) {
         PA_LLIST_REMOVE(pa_alsa_ucm_device, verb->devices, di);
         pa_proplist_free(di->proplist);
         if (di->conflicting_devices)
-            pa_idxset_free(di->conflicting_devices, NULL, NULL);
+            pa_idxset_free(di->conflicting_devices, NULL);
         if (di->supported_devices)
-            pa_idxset_free(di->supported_devices, NULL, NULL);
+            pa_idxset_free(di->supported_devices, NULL);
         pa_xfree(di);
     }
 
@@ -1547,7 +1552,7 @@ void pa_alsa_ucm_mapping_context_free(pa_alsa_ucm_mapping_context *context) {
                 dev->capture_mapping = NULL;
         }
 
-        pa_idxset_free(context->ucm_devices, NULL, NULL);
+        pa_idxset_free(context->ucm_devices, NULL);
     }
 
     if (context->ucm_modifiers) {
@@ -1558,7 +1563,7 @@ void pa_alsa_ucm_mapping_context_free(pa_alsa_ucm_mapping_context *context) {
                 mod->capture_mapping = NULL;
         }
 
-        pa_idxset_free(context->ucm_modifiers, NULL, NULL);
+        pa_idxset_free(context->ucm_modifiers, NULL);
     }
 }
 

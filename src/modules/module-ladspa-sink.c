@@ -424,20 +424,6 @@ static void sink_update_requested_latency_cb(pa_sink *s) {
 }
 
 /* Called from main context */
-static void sink_set_volume_cb(pa_sink *s) {
-    struct userdata *u;
-
-    pa_sink_assert_ref(s);
-    pa_assert_se(u = s->userdata);
-
-    if (!PA_SINK_IS_LINKED(pa_sink_get_state(s)) ||
-            !PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(u->sink_input)))
-        return;
-
-    pa_sink_input_set_volume(u->sink_input, &s->real_volume, s->save_volume, TRUE);
-}
-
-/* Called from main context */
 static void sink_set_mute_cb(pa_sink *s) {
     struct userdata *u;
 
@@ -656,16 +642,6 @@ static void sink_input_state_change_cb(pa_sink_input *i, pa_sink_input_state_t s
 }
 
 /* Called from main context */
-static pa_bool_t sink_input_may_move_to_cb(pa_sink_input *i, pa_sink *dest) {
-    struct userdata *u;
-
-    pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
-
-    return u->sink != dest;
-}
-
-/* Called from main context */
 static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
     struct userdata *u;
 
@@ -690,16 +666,6 @@ static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
         pa_sink_update_proplist(u->sink, PA_UPDATE_REPLACE, pl);
         pa_proplist_free(pl);
     }
-}
-
-/* Called from main context */
-static void sink_input_volume_changed_cb(pa_sink_input *i) {
-    struct userdata *u;
-
-    pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
-
-    pa_sink_volume_changed(u->sink, &i->volume);
 }
 
 /* Called from main context */
@@ -1132,9 +1098,9 @@ int pa__init(pa_module*m) {
         while ((pname = pa_split(input_ladspaport_map, ",", &state))) {
             if (c == u->input_count) {
                 pa_log("Too many ports in input ladspa port map");
+                pa_xfree(pname);
                 goto fail;
             }
-
 
             for (p = 0; p < d->PortCount; p++) {
                 if (pa_streq(d->PortNames[p], pname)) {
@@ -1160,6 +1126,7 @@ int pa__init(pa_module*m) {
         while ((pname = pa_split(output_ladspaport_map, ",", &state))) {
             if (c == u->output_count) {
                 pa_log("Too many ports in output ladspa port map");
+                pa_xfree(pname);
                 goto fail;
             }
             for (p = 0; p < d->PortCount; p++) {
@@ -1271,7 +1238,7 @@ int pa__init(pa_module*m) {
     }
 
     u->sink = pa_sink_new(m->core, &sink_data,
-                          (master->flags & (PA_SINK_LATENCY|PA_SINK_DYNAMIC_LATENCY)));
+                          (master->flags & (PA_SINK_LATENCY|PA_SINK_DYNAMIC_LATENCY)) | PA_SINK_SHARE_VOLUME_WITH_MASTER);
     pa_sink_new_data_done(&sink_data);
 
     if (!u->sink) {
@@ -1283,8 +1250,6 @@ int pa__init(pa_module*m) {
     u->sink->set_state = sink_set_state_cb;
     u->sink->update_requested_latency = sink_update_requested_latency_cb;
     u->sink->request_rewind = sink_request_rewind_cb;
-    pa_sink_enable_decibel_volume(u->sink, TRUE);
-    pa_sink_set_set_volume_callback(u->sink, sink_set_volume_cb);
     pa_sink_set_set_mute_callback(u->sink, sink_set_mute_cb);
     u->sink->userdata = u;
 
@@ -1317,9 +1282,7 @@ int pa__init(pa_module*m) {
     u->sink_input->attach = sink_input_attach_cb;
     u->sink_input->detach = sink_input_detach_cb;
     u->sink_input->state_change = sink_input_state_change_cb;
-    u->sink_input->may_move_to = sink_input_may_move_to_cb;
     u->sink_input->moving = sink_input_moving_cb;
-    u->sink_input->volume_changed = sink_input_volume_changed_cb;
     u->sink_input->mute_changed = sink_input_mute_changed_cb;
     u->sink_input->userdata = u;
 
@@ -1328,7 +1291,7 @@ int pa__init(pa_module*m) {
     pa_sink_put(u->sink);
     pa_sink_input_put(u->sink_input);
 
-#if HAVE_DBUS
+#ifdef HAVE_DBUS
     dbus_init(u);
 #endif
 
@@ -1366,7 +1329,7 @@ void pa__done(pa_module*m) {
     /* See comments in sink_input_kill_cb() above regarding
     * destruction order! */
 
-#if HAVE_DBUS
+#ifdef HAVE_DBUS
     dbus_done(u);
 #endif
 

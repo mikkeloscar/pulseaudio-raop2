@@ -163,7 +163,10 @@ static uint64_t get_playback_buffered_bytes(struct userdata *u) {
 
     pa_smoother_put(u->smoother, pa_rtclock_now(), pa_bytes_to_usec(played_bytes, &u->sink->sample_spec));
 
-    return u->written_bytes - played_bytes;
+    if (u->written_bytes > played_bytes)
+        return u->written_bytes - played_bytes;
+    else
+        return 0;
 }
 
 static pa_usec_t sink_get_latency(struct userdata *u, pa_sample_spec *ss) {
@@ -348,7 +351,7 @@ static int suspend(struct userdata *u) {
 
     pa_log_info("Suspending...");
 
-    ioctl(u->fd, AUDIO_DRAIN, NULL);
+    ioctl(u->fd, I_FLUSH, FLUSHRW);
     pa_close(u->fd);
     u->fd = -1;
 
@@ -587,9 +590,12 @@ static void process_rewind(struct userdata *u) {
 
     pa_assert(u);
 
-    /* Figure out how much we shall rewind and reset the counter */
+    if (!PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
+        pa_sink_process_rewind(u->sink, 0);
+        return;
+    }
+
     rewind_nbytes = u->sink->thread_info.rewind_nbytes;
-    u->sink->thread_info.rewind_nbytes = 0;
 
     if (rewind_nbytes > 0) {
         pa_log_debug("Requested to rewind %lu bytes.", (unsigned long) rewind_nbytes);
@@ -625,12 +631,12 @@ static void thread_func(void *userdata) {
     for (;;) {
         /* Render some data and write it to the dsp */
 
+        if (PA_UNLIKELY(u->sink->thread_info.rewind_requested))
+            process_rewind(u);
+
         if (u->sink && PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             pa_usec_t xtime0, ysleep_interval, xsleep_interval;
             uint64_t buffered_bytes;
-
-            if (u->sink->thread_info.rewind_requested)
-                process_rewind(u);
 
             err = ioctl(u->fd, AUDIO_GETINFO, &info);
             if (err < 0) {

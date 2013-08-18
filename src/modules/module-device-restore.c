@@ -182,7 +182,7 @@ static pa_bool_t perportentry_write(struct userdata *u, const char *basekeyname,
 static void perportentry_free(struct perportentry* e);
 #endif
 
-static struct entry* entry_new() {
+static struct entry* entry_new(void) {
     struct entry *r = pa_xnew0(struct entry, 1);
     r->version = ENTRY_VERSION;
     return r;
@@ -239,7 +239,7 @@ static struct entry* entry_read(struct userdata *u, const char *name) {
         goto fail;
 
     t = pa_tagstruct_new(data.data, data.size);
-    e = entry_new(FALSE);
+    e = entry_new();
 
     if (pa_tagstruct_getu8(t, &e->version) < 0 ||
         e->version > ENTRY_VERSION ||
@@ -351,7 +351,7 @@ static struct perportentry* perportentry_new(pa_bool_t add_pcm_format) {
 static void perportentry_free(struct perportentry* e) {
     pa_assert(e);
 
-    pa_idxset_free(e->formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+    pa_idxset_free(e->formats, (pa_free_cb_t) pa_format_info_free);
     pa_xfree(e);
 }
 
@@ -779,12 +779,13 @@ static pa_hook_result_t sink_fixate_hook_callback(pa_core *c, pa_sink_new_data *
 
             if (!new_data->volume_is_set) {
                 pa_cvolume v;
+                char buf[PA_CVOLUME_SNPRINT_MAX];
 
                 pa_log_info("Restoring volume for sink %s.", new_data->name);
-
                 v = e->volume;
                 pa_cvolume_remap(&v, &e->channel_map, &new_data->channel_map);
                 pa_sink_new_data_set_volume(new_data, &v);
+                pa_log_info("Restored volume: %s", pa_cvolume_snprint(buf, PA_CVOLUME_SNPRINT_MAX, &new_data->volume));
 
                 new_data->save_volume = TRUE;
             } else
@@ -823,14 +824,15 @@ static pa_hook_result_t sink_port_hook_callback(pa_core *c, pa_sink *sink, struc
     if ((e = perportentry_read(u, name, (sink->active_port ? sink->active_port->name : NULL)))) {
 
         if (u->restore_volume && e->volume_valid) {
-
             pa_cvolume v;
+            char buf[PA_CVOLUME_SNPRINT_MAX];
 
             pa_log_info("Restoring volume for sink %s.", sink->name);
-
             v = e->volume;
             pa_cvolume_remap(&v, &e->channel_map, &sink->channel_map);
             pa_sink_set_volume(sink, &v, TRUE, FALSE);
+            pa_log_info("Restored volume: %s", pa_cvolume_snprint(buf, PA_CVOLUME_SNPRINT_MAX, &sink->reference_volume));
+
             sink->save_volume = TRUE;
         }
 
@@ -920,12 +922,13 @@ static pa_hook_result_t source_fixate_hook_callback(pa_core *c, pa_source_new_da
 
             if (!new_data->volume_is_set) {
                 pa_cvolume v;
+                char buf[PA_CVOLUME_SNPRINT_MAX];
 
                 pa_log_info("Restoring volume for source %s.", new_data->name);
-
                 v = e->volume;
                 pa_cvolume_remap(&v, &e->channel_map, &new_data->channel_map);
                 pa_source_new_data_set_volume(new_data, &v);
+                pa_log_info("Restored volume: %s", pa_cvolume_snprint(buf, PA_CVOLUME_SNPRINT_MAX, &new_data->volume));
 
                 new_data->save_volume = TRUE;
             } else
@@ -964,14 +967,15 @@ static pa_hook_result_t source_port_hook_callback(pa_core *c, pa_source *source,
     if ((e = perportentry_read(u, name, (source->active_port ? source->active_port->name : NULL)))) {
 
         if (u->restore_volume && e->volume_valid) {
-
             pa_cvolume v;
+            char buf[PA_CVOLUME_SNPRINT_MAX];
 
             pa_log_info("Restoring volume for source %s.", source->name);
-
             v = e->volume;
             pa_cvolume_remap(&v, &e->channel_map, &source->channel_map);
             pa_source_set_volume(source, &v, TRUE, FALSE);
+            pa_log_info("Restored volume: %s", pa_cvolume_snprint(buf, PA_CVOLUME_SNPRINT_MAX, &source->reference_volume));
+
             source->save_volume = TRUE;
         }
 
@@ -1147,7 +1151,7 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
                 e = perportentry_new(FALSE);
             else {
                 /* Clean out any saved formats */
-                pa_idxset_free(e->formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+                pa_idxset_free(e->formats, (pa_free_cb_t) pa_format_info_free);
                 e->formats = pa_idxset_new(NULL, NULL);
             }
 
@@ -1334,7 +1338,7 @@ void pa__done(pa_module*m) {
     }
 
     if (u->subscribed)
-        pa_idxset_free(u->subscribed, NULL, NULL);
+        pa_idxset_free(u->subscribed, NULL);
 
     pa_xfree(u);
 }

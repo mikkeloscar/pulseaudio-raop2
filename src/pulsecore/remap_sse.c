@@ -25,6 +25,7 @@
 #endif
 
 #include <pulse/sample.h>
+#include <pulse/volume.h>
 #include <pulsecore/log.h>
 #include <pulsecore/macro.h>
 
@@ -138,9 +139,9 @@ static void init_remap_sse2(pa_remap_t *m) {
 
     /* find some common channel remappings, fall back to full matrix operation. */
     if (n_ic == 1 && n_oc == 2 &&
-            m->map_table_f[0][0] >= 1.0 && m->map_table_f[1][0] >= 1.0) {
+            m->map_table_i[0][0] == PA_VOLUME_NORM && m->map_table_i[1][0] == PA_VOLUME_NORM) {
         m->do_remap = (pa_do_remap_func_t) remap_mono_to_stereo_sse2;
-        pa_log_info("Using SSE mono to stereo remapping");
+        pa_log_info("Using SSE2 mono to stereo remapping");
     }
 }
 #endif /* defined (__i386__) || defined (__amd64__) */

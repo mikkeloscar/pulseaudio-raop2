@@ -44,6 +44,8 @@
 #include "internal.h"
 #include "stream.h"
 
+/* #define STREAM_DEBUG */
+
 #define AUTO_TIMING_INTERVAL_START_USEC (10*PA_USEC_PER_MSEC)
 #define AUTO_TIMING_INTERVAL_END_USEC (1500*PA_USEC_PER_MSEC)
 
@@ -385,7 +387,9 @@ static void request_auto_timing_update(pa_stream *s, pa_bool_t force) {
         (force || !s->auto_timing_update_requested)) {
         pa_operation *o;
 
-/*         pa_log("Automatically requesting new timing data"); */
+#ifdef STREAM_DEBUG
+        pa_log_debug("Automatically requesting new timing data");
+#endif
 
         if ((o = pa_stream_update_timing_info(s, NULL, NULL))) {
             pa_operation_unref(o);
@@ -836,7 +840,9 @@ void pa_command_request(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_tag
 
     s->requested_bytes += bytes;
 
-    /* pa_log("got request for %lli, now at %lli", (long long) bytes, (long long) s->requested_bytes); */
+#ifdef STREAM_DEBUG
+    pa_log_debug("got request for %lli, now at %lli", (long long) bytes, (long long) s->requested_bytes);
+#endif
 
     if (s->requested_bytes > 0 && s->write_callback)
         s->write_callback(s, (size_t) s->requested_bytes, s->write_userdata);
@@ -912,7 +918,9 @@ static void invalidate_indexes(pa_stream *s, pa_bool_t r, pa_bool_t w) {
     pa_assert(s);
     pa_assert(PA_REFCNT_VALUE(s) >= 1);
 
-/*     pa_log("invalidate r:%u w:%u tag:%u", r, w, s->context->ctag); */
+#ifdef STREAM_DEBUG
+    pa_log_debug("invalidate r:%u w:%u tag:%u", r, w, s->context->ctag);
+#endif
 
     if (s->state != PA_STREAM_READY)
         return;
@@ -923,7 +931,9 @@ static void invalidate_indexes(pa_stream *s, pa_bool_t r, pa_bool_t w) {
         if (s->timing_info_valid)
             s->timing_info.write_index_corrupt = TRUE;
 
-/*         pa_log("write_index invalidated"); */
+#ifdef STREAM_DEBUG
+        pa_log_debug("write_index invalidated");
+#endif
     }
 
     if (r) {
@@ -932,7 +942,9 @@ static void invalidate_indexes(pa_stream *s, pa_bool_t r, pa_bool_t w) {
         if (s->timing_info_valid)
             s->timing_info.read_index_corrupt = TRUE;
 
-/*         pa_log("read_index invalidated"); */
+#ifdef STREAM_DEBUG
+        pa_log_debug("read_index invalidated");
+#endif
     }
 
     request_auto_timing_update(s, TRUE);
@@ -1542,7 +1554,9 @@ int pa_stream_write(
      * that's OK, the server side applies the same error */
     s->requested_bytes -= (seek == PA_SEEK_RELATIVE ? offset : 0) + (int64_t) length;
 
-    /* pa_log("wrote %lli, now at %lli", (long long) length, (long long) s->requested_bytes); */
+#ifdef STREAM_DEBUG
+    pa_log_debug("wrote %lli, now at %lli", (long long) length, (long long) s->requested_bytes);
+#endif
 
     if (s->direction == PA_STREAM_PLAYBACK) {
 
@@ -1593,8 +1607,16 @@ int pa_stream_peek(pa_stream *s, const void **data, size_t *length) {
     if (!s->peek_memchunk.memblock) {
 
         if (pa_memblockq_peek(s->record_memblockq, &s->peek_memchunk) < 0) {
+            /* record_memblockq is empty. */
             *data = NULL;
             *length = 0;
+            return 0;
+
+        } else if (!s->peek_memchunk.memblock) {
+            /* record_memblockq isn't empty, but it doesn't have any data at
+             * the current read index. */
+            *data = NULL;
+            *length = s->peek_memchunk.length;
             return 0;
         }
 
@@ -1614,7 +1636,7 @@ int pa_stream_drop(pa_stream *s) {
     PA_CHECK_VALIDITY(s->context, !pa_detect_fork(), PA_ERR_FORKED);
     PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
     PA_CHECK_VALIDITY(s->context, s->direction == PA_STREAM_RECORD, PA_ERR_BADSTATE);
-    PA_CHECK_VALIDITY(s->context, s->peek_memchunk.memblock, PA_ERR_BADSTATE);
+    PA_CHECK_VALIDITY(s->context, s->peek_memchunk.length > 0, PA_ERR_BADSTATE);
 
     pa_memblockq_drop(s->record_memblockq, s->peek_memchunk.length);
 
@@ -1622,9 +1644,13 @@ int pa_stream_drop(pa_stream *s) {
     if (s->timing_info_valid && !s->timing_info.read_index_corrupt)
         s->timing_info.read_index += (int64_t) s->peek_memchunk.length;
 
-    pa_assert(s->peek_data);
-    pa_memblock_release(s->peek_memchunk.memblock);
-    pa_memblock_unref(s->peek_memchunk.memblock);
+    if (s->peek_memchunk.memblock) {
+        pa_assert(s->peek_data);
+        s->peek_data = NULL;
+        pa_memblock_release(s->peek_memchunk.memblock);
+        pa_memblock_unref(s->peek_memchunk.memblock);
+    }
+
     pa_memchunk_reset(&s->peek_memchunk);
 
     return 0;

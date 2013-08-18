@@ -68,8 +68,13 @@
  * /dev/shm. We can use that information to list all blocks and
  * cleanup unused ones */
 #define SHM_PATH "/dev/shm/"
+#define SHM_ID_LEN 10
+#elif defined(__sun)
+#define SHM_PATH "/tmp"
+#define SHM_ID_LEN 15
 #else
 #undef SHM_PATH
+#undef SHM_ID_LEN
 #endif
 
 #define SHM_MARKER ((int) 0xbeefcafe)
@@ -106,6 +111,7 @@ int pa_shm_create_rw(pa_shm *m, size_t size, pa_bool_t shared, mode_t mode) {
     pa_assert(m);
     pa_assert(size > 0);
     pa_assert(size <= MAX_SHM_SIZE);
+    pa_assert(!(mode & ~0777));
     pa_assert(mode >= 0600);
 
     /* Each time we create a new SHM area, let's first drop all stale
@@ -146,7 +152,7 @@ int pa_shm_create_rw(pa_shm *m, size_t size, pa_bool_t shared, mode_t mode) {
         pa_random(&m->id, sizeof(m->id));
         segment_name(fn, sizeof(fn), m->id);
 
-        if ((fd = shm_open(fn, O_RDWR|O_CREAT|O_EXCL, mode & 0444)) < 0) {
+        if ((fd = shm_open(fn, O_RDWR|O_CREAT|O_EXCL, mode)) < 0) {
             pa_log("shm_open() failed: %s", pa_cstrerror(errno));
             goto fail;
         }
@@ -359,10 +365,14 @@ int pa_shm_cleanup(void) {
         char fn[128];
         struct shm_marker *m;
 
-        if (strncmp(de->d_name, "pulse-shm-", 10))
+#if defined(__sun)
+        if (strncmp(de->d_name, ".SHMDpulse-shm-", SHM_ID_LEN))
+#else
+        if (strncmp(de->d_name, "pulse-shm-", SHM_ID_LEN))
+#endif
             continue;
 
-        if (pa_atou(de->d_name + 10, &id) < 0)
+        if (pa_atou(de->d_name + SHM_ID_LEN, &id) < 0)
             continue;
 
         if (pa_shm_attach_ro(&seg, id) < 0)

@@ -47,6 +47,7 @@ static const char* const _encoding_str_table[]= {
     [PA_ENCODING_EAC3_IEC61937] = "eac3-iec61937",
     [PA_ENCODING_MPEG_IEC61937] = "mpeg-iec61937",
     [PA_ENCODING_DTS_IEC61937] = "dts-iec61937",
+    [PA_ENCODING_MPEG2_AAC_IEC61937] = "mpeg2-aac-iec61937",
     [PA_ENCODING_ANY] = "any",
 };
 
@@ -98,10 +99,6 @@ void pa_format_info_free(pa_format_info *f) {
 
     pa_proplist_free(f->plist);
     pa_xfree(f);
-}
-
-void pa_format_info_free2(pa_format_info *f, void *userdata) {
-    pa_format_info_free(f);
 }
 
 int pa_format_info_valid(const pa_format_info *f) {

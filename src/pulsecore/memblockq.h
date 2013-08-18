@@ -51,7 +51,7 @@ typedef struct pa_memblockq pa_memblockq;
 
    - ss:        Sample spec describing the queue contents. Only multiples
                 of the frame size as implied by the sample spec are
-                popped from the queue or should be pushed into it.
+                allowed into the queue or can be popped from it.
 
    - prebuf:    If the queue runs empty wait until this many bytes are in
                 queue again before passing the first byte out. If set
@@ -164,8 +164,8 @@ int64_t pa_memblockq_get_write_index(pa_memblockq *bq);
 /* Change metrics. Always call in order. */
 void pa_memblockq_set_maxlength(pa_memblockq *memblockq, size_t maxlength); /* might modify tlength, prebuf, minreq too */
 void pa_memblockq_set_tlength(pa_memblockq *memblockq, size_t tlength); /* might modify minreq, too */
-void pa_memblockq_set_prebuf(pa_memblockq *memblockq, size_t prebuf); /* might modify minreq, too */
-void pa_memblockq_set_minreq(pa_memblockq *memblockq, size_t minreq);
+void pa_memblockq_set_minreq(pa_memblockq *memblockq, size_t minreq); /* might modify prebuf, too */
+void pa_memblockq_set_prebuf(pa_memblockq *memblockq, size_t prebuf);
 void pa_memblockq_set_maxrewind(pa_memblockq *memblockq, size_t maxrewind); /* Set the maximum history size */
 void pa_memblockq_set_silence(pa_memblockq *memblockq, pa_memchunk *silence);
 

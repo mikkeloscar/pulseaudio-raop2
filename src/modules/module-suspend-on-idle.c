@@ -128,15 +128,13 @@ static void resume(struct device_info *d) {
     d->userdata->core->mainloop->time_restart(d->time_event, NULL);
 
     if (d->sink) {
+        pa_log_debug("Sink %s becomes busy, resuming.", d->sink->name);
         pa_sink_suspend(d->sink, FALSE, PA_SUSPEND_IDLE);
-
-        pa_log_debug("Sink %s becomes busy.", d->sink->name);
     }
 
     if (d->source) {
+        pa_log_debug("Source %s becomes busy, resuming.", d->source->name);
         pa_source_suspend(d->source, FALSE, PA_SUSPEND_IDLE);
-
-        pa_log_debug("Source %s becomes busy.", d->source->name);
     }
 }
 
@@ -476,7 +474,6 @@ fail:
 
 void pa__done(pa_module*m) {
     struct userdata *u;
-    struct device_info *d;
 
     pa_assert(m);
 
@@ -521,10 +518,7 @@ void pa__done(pa_module*m) {
     if (u->source_output_state_changed_slot)
         pa_hook_slot_free(u->source_output_state_changed_slot);
 
-    while ((d = pa_hashmap_steal_first(u->device_infos)))
-        device_info_free(d);
-
-    pa_hashmap_free(u->device_infos, NULL, NULL);
+    pa_hashmap_free(u->device_infos, (pa_free_cb_t) device_info_free);
 
     pa_xfree(u);
 }

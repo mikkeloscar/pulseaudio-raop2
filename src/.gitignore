@@ -26,6 +26,7 @@ start-pulseaudio-kde
 *-symdef.h
 *-orc-gen.[ch]
 # tests
+alsa-mixer-path-test
 alsa-time-test
 asyncmsgq-test
 asyncq-test
@@ -49,6 +50,7 @@ mainloop-test-glib
 mcalign-test
 memblockq-test
 memblock-test
+mix-special-test
 mix-test
 once-test
 pacat-simple
@@ -71,3 +73,4 @@ thread-test
 usergroup-test
 utf8-test
 volume-test
+mult-s16-test

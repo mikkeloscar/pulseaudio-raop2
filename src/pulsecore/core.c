@@ -141,7 +141,7 @@ pa_core* pa_core_new(pa_mainloop_api *m, pa_bool_t shared, size_t shm_size) {
     c->disable_remixing = FALSE;
     c->disable_lfe_remixing = FALSE;
     c->deferred_volume = TRUE;
-    c->resample_method = PA_RESAMPLER_SPEEX_FLOAT_BASE + 3;
+    c->resample_method = PA_RESAMPLER_SPEEX_FLOAT_BASE + 1;
 
     for (j = 0; j < PA_CORE_HOOK_MAX; j++)
         pa_hook_init(&c->hooks[j], c);
@@ -170,34 +170,34 @@ static void core_free(pa_object *o) {
      * we get here */
 
     pa_assert(pa_idxset_isempty(c->scache));
-    pa_idxset_free(c->scache, NULL, NULL);
+    pa_idxset_free(c->scache, NULL);
 
     pa_assert(pa_idxset_isempty(c->modules));
-    pa_idxset_free(c->modules, NULL, NULL);
+    pa_idxset_free(c->modules, NULL);
 
     pa_assert(pa_idxset_isempty(c->clients));
-    pa_idxset_free(c->clients, NULL, NULL);
+    pa_idxset_free(c->clients, NULL);
 
     pa_assert(pa_idxset_isempty(c->cards));
-    pa_idxset_free(c->cards, NULL, NULL);
+    pa_idxset_free(c->cards, NULL);
 
     pa_assert(pa_idxset_isempty(c->sinks));
-    pa_idxset_free(c->sinks, NULL, NULL);
+    pa_idxset_free(c->sinks, NULL);
 
     pa_assert(pa_idxset_isempty(c->sources));
-    pa_idxset_free(c->sources, NULL, NULL);
+    pa_idxset_free(c->sources, NULL);
 
     pa_assert(pa_idxset_isempty(c->source_outputs));
-    pa_idxset_free(c->source_outputs, NULL, NULL);
+    pa_idxset_free(c->source_outputs, NULL);
 
     pa_assert(pa_idxset_isempty(c->sink_inputs));
-    pa_idxset_free(c->sink_inputs, NULL, NULL);
+    pa_idxset_free(c->sink_inputs, NULL);
 
     pa_assert(pa_hashmap_isempty(c->namereg));
-    pa_hashmap_free(c->namereg, NULL, NULL);
+    pa_hashmap_free(c->namereg, NULL);
 
     pa_assert(pa_hashmap_isempty(c->shared));
-    pa_hashmap_free(c->shared, NULL, NULL);
+    pa_hashmap_free(c->shared, NULL);
 
     pa_subscription_free_all(c);
 

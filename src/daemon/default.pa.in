@@ -44,6 +44,9 @@ load-module module-card-restore
 ### stored in /usr/share/application
 load-module module-augment-properties
 
+### Should be after module-*-restore but before module-*-detect
+load-module module-switch-on-port-available
+
 ### Load audio drivers statically
 ### (it's probably better to not load these drivers manually, but instead
 ### use module-udev-detect -- see below -- for doing this automatically)
@@ -78,12 +81,16 @@ load-module module-detect
 ### Automatically connect sink and source if JACK server is present
 .ifexists module-jackdbus-detect@PA_SOEXT@
 .nofail
-load-module module-jackdbus-detect
+load-module module-jackdbus-detect channels=2
 .fail
 .endif
 
 ifelse(@HAVE_BLUEZ@, 1, [dnl
 ### Automatically load driver modules for Bluetooth hardware
+.ifexists module-bluetooth-policy@PA_SOEXT@
+load-module module-bluetooth-policy
+.endif
+
 .ifexists module-bluetooth-discover@PA_SOEXT@
 load-module module-bluetooth-discover
 .endif
@@ -188,8 +195,6 @@ ifelse(@HAVE_X11@, 1, [dnl
 #.fail
 #.endif
 ])dnl
-
-load-module module-switch-on-port-available
 
 ### Make some devices default
 #set-default-sink output

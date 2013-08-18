@@ -417,14 +417,18 @@ static pa_hook_result_t process(struct userdata *u, pa_object *o, pa_bool_t is_s
     pa_bool_t done_something = FALSE;
     pa_sink *sink = NULL;
     pa_source *source = NULL;
-    pa_module *module;
+    pa_module *module = NULL;
 
     if (is_sink_input) {
         sink = PA_SINK_INPUT(o)->sink;
-        module = sink->module;
+
+        if (sink)
+            module = sink->module;
     } else {
         source = PA_SOURCE_OUTPUT(o)->source;
-        module = source->module;
+
+        if (source)
+            module = source->module;
     }
 
     /* If there is no sink/source yet, we can't do much */
@@ -743,7 +747,7 @@ void pa__done(pa_module *m) {
             filter_free(f);
         }
 
-        pa_hashmap_free(u->filters, NULL, NULL);
+        pa_hashmap_free(u->filters, NULL);
     }
 
     pa_xfree(u);

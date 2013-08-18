@@ -313,11 +313,11 @@ static void report_port_state(pa_device_port *p, struct userdata *u)
 {
     void *state;
     pa_alsa_jack *jack;
-    pa_port_available_t pa = PA_PORT_AVAILABLE_UNKNOWN;
+    pa_available_t pa = PA_AVAILABLE_UNKNOWN;
     pa_device_port *port;
 
     PA_HASHMAP_FOREACH(jack, u->jacks, state) {
-        pa_port_available_t cpa;
+        pa_available_t cpa;
 
         if (u->use_ucm)
             port = pa_hashmap_get(u->card->ports, jack->name);
@@ -334,11 +334,11 @@ static void report_port_state(pa_device_port *p, struct userdata *u)
         cpa = jack->plugged_in ? jack->state_plugged : jack->state_unplugged;
 
         /* "Yes" and "no" trumphs "unknown" if we have more than one jack */
-        if (cpa == PA_PORT_AVAILABLE_UNKNOWN)
+        if (cpa == PA_AVAILABLE_UNKNOWN)
             continue;
 
-        if ((cpa == PA_PORT_AVAILABLE_NO && pa == PA_PORT_AVAILABLE_YES) ||
-            (pa == PA_PORT_AVAILABLE_NO && cpa == PA_PORT_AVAILABLE_YES))
+        if ((cpa == PA_AVAILABLE_NO && pa == PA_AVAILABLE_YES) ||
+            (pa == PA_AVAILABLE_NO && cpa == PA_AVAILABLE_YES))
             pa_log_warn("Availability of port '%s' is inconsistent!", p->name);
         else
             pa = cpa;
@@ -386,6 +386,83 @@ static int report_jack_state(snd_hctl_elem_t *elem, unsigned int mask)
             report_port_state(port, u);
         }
     return 0;
+}
+
+static pa_device_port* find_port_with_eld_device(pa_hashmap *ports, int device) {
+    void *state;
+    pa_device_port *p;
+
+    PA_HASHMAP_FOREACH(p, ports, state) {
+        pa_alsa_port_data *data = PA_DEVICE_PORT_DATA(p);
+        pa_assert(data->path);
+        if (device == data->path->eld_device)
+            return p;
+    }
+    return NULL;
+}
+
+static int hdmi_eld_changed(snd_hctl_elem_t *elem, unsigned int mask) {
+    struct userdata *u = snd_hctl_elem_get_callback_private(elem);
+    int device = snd_hctl_elem_get_device(elem);
+    const char *old_monitor_name;
+    pa_device_port *p;
+    pa_hdmi_eld eld;
+    bool changed = false;
+
+    if (mask == SND_CTL_EVENT_MASK_REMOVE)
+        return 0;
+
+    p = find_port_with_eld_device(u->card->ports, device);
+    if (p == NULL) {
+        pa_log_error("Invalid device changed in ALSA: %d", device);
+        return 0;
+    }
+
+    if (pa_alsa_get_hdmi_eld(u->hctl_handle, device, &eld) < 0)
+        memset(&eld, 0, sizeof(eld));
+
+    old_monitor_name = pa_proplist_gets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME);
+    if (eld.monitor_name[0] == '\0') {
+        changed |= old_monitor_name != NULL;
+        pa_proplist_unset(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME);
+    } else {
+        changed |= (old_monitor_name == NULL) || (strcmp(old_monitor_name, eld.monitor_name) != 0);
+        pa_proplist_sets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME, eld.monitor_name);
+    }
+
+    if (changed && mask != 0)
+        pa_subscription_post(u->core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, u->card->index);
+
+    return 0;
+}
+
+static void init_eld_ctls(struct userdata *u) {
+    void *state;
+    pa_device_port *port;
+
+    if (!u->hctl_handle)
+        return;
+
+    PA_HASHMAP_FOREACH(port, u->card->ports, state) {
+        pa_alsa_port_data *data = PA_DEVICE_PORT_DATA(port);
+        snd_hctl_elem_t* hctl_elem;
+        int device;
+
+        pa_assert(data->path);
+        device = data->path->eld_device;
+        if (device < 0)
+            continue;
+
+        hctl_elem = pa_alsa_find_eld_ctl(u->hctl_handle, device);
+        if (!hctl_elem) {
+            pa_log_debug("No ELD device found for port %s.", port->name);
+            continue;
+        }
+
+        snd_hctl_elem_set_callback_private(hctl_elem, u);
+        snd_hctl_elem_set_callback(hctl_elem, hdmi_eld_changed);
+        hdmi_eld_changed(hctl_elem, 0);
+    }
 }
 
 static void init_jacks(struct userdata *u) {
@@ -612,10 +689,10 @@ int pa__init(pa_module *m) {
         pa_xfree(fn);
     }
 
-    u->profile_set->ignore_dB = ignore_dB;
-
     if (!u->profile_set)
         goto fail;
+
+    u->profile_set->ignore_dB = ignore_dB;
 
     pa_alsa_profile_set_probe(u->profile_set, u->device_id, &m->core->default_sample_spec, m->core->default_n_fragments, m->core->default_fragment_size_msec);
     pa_alsa_profile_set_dump(u->profile_set);
@@ -674,8 +751,9 @@ int pa__init(pa_module *m) {
     u->card->userdata = u;
     u->card->set_profile = card_set_profile;
 
-    init_profile(u);
     init_jacks(u);
+    init_profile(u);
+    init_eld_ctls(u);
 
     if (reserve)
         pa_reserve_wrapper_unref(reserve);
@@ -744,21 +822,13 @@ void pa__done(pa_module*m) {
     if (u->mixer_handle)
         snd_mixer_close(u->mixer_handle);
     if (u->jacks)
-        pa_hashmap_free(u->jacks, NULL, NULL);
+        pa_hashmap_free(u->jacks, NULL);
 
-    if (u->card && u->card->sinks) {
-        pa_sink *s;
+    if (u->card && u->card->sinks)
+        pa_idxset_remove_all(u->card->sinks, (pa_free_cb_t) pa_alsa_sink_free);
 
-        while ((s = pa_idxset_steal_first(u->card->sinks, NULL)))
-            pa_alsa_sink_free(s);
-    }
-
-    if (u->card && u->card->sources) {
-        pa_source *s;
-
-        while ((s = pa_idxset_steal_first(u->card->sources, NULL)))
-            pa_alsa_source_free(s);
-    }
+    if (u->card && u->card->sources)
+        pa_idxset_remove_all(u->card->sources, (pa_free_cb_t) pa_alsa_source_free);
 
     if (u->card)
         pa_card_free(u->card);

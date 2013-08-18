@@ -93,9 +93,14 @@ static inline int PA_STREAM_IS_GOOD(pa_stream_state_t x) {
 
 /** The state of an operation */
 typedef enum pa_operation_state {
-    PA_OPERATION_RUNNING,      /**< The operation is still running */
-    PA_OPERATION_DONE,         /**< The operation has been completed */
-    PA_OPERATION_CANCELLED     /**< The operation has been cancelled. Before 0.9.18 this was called PA_OPERATION_CANCELED. That name is still available for compatibility. */
+    PA_OPERATION_RUNNING,
+    /**< The operation is still running */
+    PA_OPERATION_DONE,
+    /**< The operation has completed */
+    PA_OPERATION_CANCELLED
+    /**< The operation has been cancelled. Operations may get cancelled by the
+     * application, or as a result of the context getting disconneted while the
+     * operation is pending. */
 } pa_operation_state_t;
 
 /** \cond fulldocs */
@@ -125,7 +130,7 @@ typedef enum pa_context_flags {
 /** \endcond */
 
 /** Direction bitfield - while we currently do not expose anything bidirectional,
-  one should test against the bit instead of the value (e g if (d & PA_DIRECTION_OUTPUT)),
+  one should test against the bit instead of the value (e.g.\ if (d & PA_DIRECTION_OUTPUT)),
   because we might add bidirectional stuff in the future. \since 2.0
 */
 typedef enum pa_direction {
@@ -355,7 +360,13 @@ typedef struct pa_buffer_attr {
     uint32_t maxlength;
     /**< Maximum length of the buffer in bytes. Setting this to (uint32_t) -1
      * will initialize this to the maximum value supported by server,
-     * which is recommended. */
+     * which is recommended.
+     *
+     * In strict low-latency playback scenarios you might want to set this to
+     * a lower value, likely together with the PA_STREAM_ADJUST_LATENCY flag.
+     * If you do so, you ensure that the latency doesn't grow beyond what is
+     * acceptable for the use case, at the cost of getting more underruns if
+     * the latency is lower than what the server can reliably handle. */
 
     uint32_t tlength;
     /**< Playback only: target length of the buffer. The server tries
@@ -760,7 +771,7 @@ typedef enum pa_sink_flags {
      * \since 0.9.11 */
 
     PA_SINK_FLAT_VOLUME = 0x0040U,
-    /**< This sink is in flat volume mode, i.e. always the maximum of
+    /**< This sink is in flat volume mode, i.e.\ always the maximum of
      * the volume of all connected inputs. \since 0.9.15 */
 
     PA_SINK_DYNAMIC_LATENCY = 0x0080U,
@@ -888,7 +899,7 @@ typedef enum pa_source_flags {
      * needs of the connected streams. \since 0.9.15 */
 
     PA_SOURCE_FLAT_VOLUME = 0x0080U,
-    /**< This source is in flat volume mode, i.e. always the maximum of
+    /**< This source is in flat volume mode, i.e.\ always the maximum of
      * the volume of all connected outputs. \since 1.0 */
 
 #ifdef __INCLUDED_FROM_PULSE_AUDIO
@@ -976,7 +987,7 @@ typedef void (*pa_free_cb_t)(void *p);
 
 /** A stream policy/meta event requesting that an application should
  * cork a specific stream. See pa_stream_event_cb_t for more
- * information, \since 0.9.15 */
+ * information. \since 0.9.15 */
 #define PA_STREAM_EVENT_REQUEST_CORK "request-cork"
 
 /** A stream policy/meta event requesting that an application should
@@ -988,9 +999,10 @@ typedef void (*pa_free_cb_t)(void *p);
  * disconnected because the underlying sink changed and no longer
  * supports the format that was originally negotiated. Clients need
  * to connect a new stream to renegotiate a format and continue
- * playback, \since 1.0 */
+ * playback. \since 1.0 */
 #define PA_STREAM_EVENT_FORMAT_LOST "format-lost"
 
+#ifndef __INCLUDED_FROM_PULSE_AUDIO
 /** Port availability / jack detection status
  * \since 2.0 */
 typedef enum pa_port_available {
@@ -1005,6 +1017,7 @@ typedef enum pa_port_available {
 #define PA_PORT_AVAILABLE_YES PA_PORT_AVAILABLE_YES
 
 /** \endcond */
+#endif
 
 PA_C_DECL_END
 

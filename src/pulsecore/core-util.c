@@ -150,6 +150,8 @@ static pa_strlist *recorded_env = NULL;
 
 #ifdef OS_IS_WIN32
 
+#include "poll.h"
+
 /* Returns the directory of the current DLL, with '/bin/' removed if it is the last component */
 char *pa_win32_get_toplevel(HANDLE handle) {
     static char *toplevel = NULL;
@@ -368,13 +370,26 @@ ssize_t pa_read(int fd, void *buf, size_t count, int *type) {
 #ifdef OS_IS_WIN32
 
     if (!type || *type == 0) {
+        int err;
         ssize_t r;
 
+retry:
         if ((r = recv(fd, buf, count, 0)) >= 0)
             return r;
 
-        if (WSAGetLastError() != WSAENOTSOCK) {
-            errno = WSAGetLastError();
+        err = WSAGetLastError();
+        if (err != WSAENOTSOCK) {
+            /* transparently handle non-blocking sockets, by waiting
+             * for readiness */
+            if (err == WSAEWOULDBLOCK) {
+                struct pollfd pfd;
+                pfd.fd = fd;
+                pfd.events = POLLIN;
+                if (pa_poll(&pfd, 1, -1) >= 0) {
+                    goto retry;
+                }
+            }
+            errno = err;
             return r;
         }
 
@@ -400,7 +415,11 @@ ssize_t pa_write(int fd, const void *buf, size_t count, int *type) {
 
     if (!type || *type == 0) {
         ssize_t r;
+#ifdef OS_IS_WIN32
+        int err;
 
+retry:
+#endif
         for (;;) {
             if ((r = send(fd, buf, count, MSG_NOSIGNAL)) < 0) {
 
@@ -414,8 +433,19 @@ ssize_t pa_write(int fd, const void *buf, size_t count, int *type) {
         }
 
 #ifdef OS_IS_WIN32
-        if (WSAGetLastError() != WSAENOTSOCK) {
-            errno = WSAGetLastError();
+        err = WSAGetLastError();
+        if (err != WSAENOTSOCK) {
+            /* transparently handle non-blocking sockets, by waiting
+             * for readiness */
+            if (err == WSAEWOULDBLOCK) {
+                struct pollfd pfd;
+                pfd.fd = fd;
+                pfd.events = POLLOUT;
+                if (pa_poll(&pfd, 1, -1) >= 0) {
+                    goto retry;
+                }
+            }
+            errno = err;
             return r;
         }
 #else
@@ -930,6 +960,48 @@ int pa_parse_boolean(const char *v) {
 
     errno = EINVAL;
     return -1;
+}
+
+/* Try to parse a volume string to pa_volume_t. The allowed formats are:
+ * db, % and unsigned integer */
+int pa_parse_volume(const char *v, pa_volume_t *volume) {
+    int len, ret = -1;
+    uint32_t i;
+    double d;
+    char str[64];
+
+    pa_assert(v);
+    pa_assert(volume);
+
+    len = strlen(v);
+
+    if (len >= 64)
+        return -1;
+
+    memcpy(str, v, len + 1);
+
+    if (str[len - 1] == '%') {
+        str[len - 1] = '\0';
+        if (pa_atou(str, &i) == 0) {
+            *volume = PA_CLAMP_VOLUME((uint64_t) PA_VOLUME_NORM * i / 100);
+            ret = 0;
+        }
+    } else if (len > 2 && (str[len - 1] == 'b' || str[len - 1] == 'B') &&
+               (str[len - 2] == 'd' || str[len - 2] == 'D')) {
+        str[len - 2] = '\0';
+        if (pa_atod(str, &d) == 0) {
+            *volume = pa_sw_volume_from_dB(d);
+            ret = 0;
+        }
+    } else {
+        if (pa_atou(v, &i) == 0) {
+            *volume= PA_CLAMP_VOLUME(i);
+            ret = 0;
+        }
+
+    }
+
+    return ret;
 }
 
 /* Split the specified string wherever one of the strings in delimiter
@@ -1663,7 +1735,6 @@ char *pa_get_runtime_dir(void) {
         k = pa_sprintf_malloc("%s" PA_PATH_SEP "pulse", d);
 
         if (pa_make_secure_dir(k, m, (uid_t) -1, (gid_t) -1, TRUE) < 0) {
-            free(k);
             pa_log_error("Failed to create secure directory (%s): %s", k, pa_cstrerror(errno));
             goto fail;
         }
@@ -1717,8 +1788,9 @@ char *pa_get_runtime_dir(void) {
                 goto fail;
             }
 #else
-            /* No symlink possible, so let's just create the runtime directly */
-            if (mkdir(k) < 0)
+            /* No symlink possible, so let's just create the runtime directly
+             * Do not check again if it exists since it cannot be a symlink */
+            if (mkdir(k) < 0 && errno != EEXIST)
                 goto fail;
 #endif
 
@@ -2066,9 +2138,9 @@ char *pa_make_path_absolute(const char *p) {
     return r;
 }
 
-/* if fn is null return the PulseAudio run time path in s (~/.pulse)
- * if fn is non-null and starts with / return fn
- * otherwise append fn to the run time path and return it */
+/* If fn is NULL, return the PulseAudio runtime or state dir (depending on the
+ * rt parameter). If fn is non-NULL and starts with /, return fn. Otherwise,
+ * append fn to the runtime/state dir and return it. */
 static char *get_path(const char *fn, pa_bool_t prependmid, pa_bool_t rt) {
     char *rtp;
 
@@ -3155,21 +3227,19 @@ void pa_reset_personality(void) {
 
 }
 
-#if defined(__linux__) && !defined(__OPTIMIZE__)
-
 pa_bool_t pa_run_from_build_tree(void) {
     char *rp;
-    pa_bool_t b = FALSE;
+    static pa_bool_t b = FALSE;
 
-    if ((rp = pa_readlink("/proc/self/exe"))) {
-        b = pa_startswith(rp, PA_BUILDDIR);
-        pa_xfree(rp);
-    }
+    PA_ONCE_BEGIN {
+        if ((rp = pa_readlink("/proc/self/exe"))) {
+            b = pa_startswith(rp, PA_BUILDDIR);
+            pa_xfree(rp);
+        }
+    } PA_ONCE_END;
 
     return b;
 }
-
-#endif
 
 const char *pa_get_temp_dir(void) {
     const char *t;

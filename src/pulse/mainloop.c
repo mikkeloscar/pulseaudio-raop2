@@ -114,7 +114,7 @@ struct pa_mainloop {
     int retval;
     pa_bool_t quit:1;
 
-    pa_bool_t wakeup_requested:1;
+    pa_atomic_t wakeup_requested;
     int wakeup_pipe[2];
     int wakeup_pipe_type;
 
@@ -174,24 +174,6 @@ static pa_io_event* mainloop_io_new(
 
     e->callback = callback;
     e->userdata = userdata;
-
-#ifdef OS_IS_WIN32
-    {
-        fd_set xset;
-        struct timeval tv;
-
-        tv.tv_sec = 0;
-        tv.tv_usec = 0;
-
-        FD_ZERO (&xset);
-        FD_SET (fd, &xset);
-
-        if ((select(fd, NULL, NULL, &xset, &tv) == -1) && (WSAGetLastError() == WSAENOTSOCK)) {
-            pa_log_warn("Cannot monitor non-socket file descriptors.");
-            e->dead = TRUE;
-        }
-    }
-#endif
 
     PA_LLIST_PREPEND(pa_io_event, m->io_events, e);
     m->rebuild_pollfds = TRUE;
@@ -629,13 +611,11 @@ static void rebuild_pollfds(pa_mainloop *m) {
     m->n_pollfds = 0;
     p = m->pollfds;
 
-    if (m->wakeup_pipe[0] >= 0) {
-        m->pollfds[0].fd = m->wakeup_pipe[0];
-        m->pollfds[0].events = POLLIN;
-        m->pollfds[0].revents = 0;
-        p++;
-        m->n_pollfds++;
-    }
+    m->pollfds[0].fd = m->wakeup_pipe[0];
+    m->pollfds[0].events = POLLIN;
+    m->pollfds[0].revents = 0;
+    p++;
+    m->n_pollfds++;
 
     PA_LLIST_FOREACH(e, m->io_events) {
         if (e->dead) {
@@ -790,10 +770,11 @@ void pa_mainloop_wakeup(pa_mainloop *m) {
     char c = 'W';
     pa_assert(m);
 
-    if (m->wakeup_pipe[1] >= 0 && m->state == STATE_POLLING) {
-        pa_write(m->wakeup_pipe[1], &c, sizeof(c), &m->wakeup_pipe_type);
-        m->wakeup_requested++;
-    }
+    if (pa_write(m->wakeup_pipe[1], &c, sizeof(c), &m->wakeup_pipe_type) < 0)
+        /* Not much options for recovering from the error. Let's at least log something. */
+        pa_log("pa_write() failed while trying to wake up the mainloop: %s", pa_cstrerror(errno));
+
+    pa_atomic_store(&m->wakeup_requested, TRUE);
 }
 
 static void clear_wakeup(pa_mainloop *m) {
@@ -801,13 +782,9 @@ static void clear_wakeup(pa_mainloop *m) {
 
     pa_assert(m);
 
-    if (m->wakeup_pipe[0] < 0)
-        return;
-
-    if (m->wakeup_requested) {
+    if (pa_atomic_cmpxchg(&m->wakeup_requested, TRUE, FALSE)) {
         while (pa_read(m->wakeup_pipe[0], &c, sizeof(c), &m->wakeup_pipe_type) == sizeof(c))
             ;
-        m->wakeup_requested = 0;
     }
 }
 

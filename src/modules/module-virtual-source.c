@@ -39,6 +39,7 @@
 #include <pulsecore/rtpoll.h>
 #include <pulsecore/sample-util.h>
 #include <pulsecore/ltdl-helper.h>
+#include <pulsecore/mix.h>
 
 #include "module-virtual-source-symdef.h"
 
@@ -126,6 +127,7 @@ static int sink_set_state_cb(pa_sink *s, pa_sink_state_t state) {
 
     if (state == PA_SINK_RUNNING) {
         /* need to wake-up source if it was suspended */
+        pa_log_debug("Resuming source %s, because its uplink sink became active.", u->source->name);
         pa_source_suspend(u->source, FALSE, PA_SUSPEND_ALL);
 
         /* FIXME: if there's no client connected, the source will suspend
@@ -366,14 +368,6 @@ static void source_output_process_rewind_cb(pa_source_output *o, size_t nbytes) 
 }
 
 /* Called from output thread context */
-static int source_output_process_msg_cb(pa_msgobject *obj, int code, void *data, int64_t offset, pa_memchunk *chunk) {
-
-    /* FIXME, nothing to do here ? */
-
-    return pa_source_output_process_msg(obj, code, data, offset, chunk);
-}
-
-/* Called from output thread context */
 static void source_output_attach_cb(pa_source_output *o) {
     struct userdata *u;
 
@@ -443,20 +437,6 @@ static void source_output_kill_cb(pa_source_output *o) {
     u->source = NULL;
 
     pa_module_unload_request(u->module, TRUE);
-}
-
-/* Called from main thread */
-static pa_bool_t source_output_may_move_to_cb(pa_source_output *o, pa_source *dest) {
-    struct userdata *u;
-
-    pa_source_output_assert_ref(o);
-    pa_assert_ctl_context();
-    pa_assert_se(u = o->userdata);
-
-    /* FIXME */
-    //return dest != u->source_input->source->monitor_source;
-
-    return TRUE;
 }
 
 /* Called from main thread */
@@ -541,10 +521,6 @@ int pa__init(pa_module*m) {
     }
 
     u = pa_xnew0(struct userdata, 1);
-    if (!u) {
-        pa_log("Failed to alloc userdata");
-        goto fail;
-    }
     u->module = m;
     m->userdata = u;
     u->memblockq = pa_memblockq_new("module-virtual-source memblockq", 0, MEMBLOCKQ_MAXLENGTH, 0, &ss, 1, 1, 0, NULL);
@@ -610,8 +586,6 @@ int pa__init(pa_module*m) {
     source_output_data.module = m;
     pa_source_output_new_data_set_source(&source_output_data, master, FALSE);
     source_output_data.destination_source = u->source;
-    /* FIXME
-       source_output_data.flags = PA_SOURCE_OUTPUT_DONT_INHIBIT_AUTO_SUSPEND; */
 
     pa_proplist_setf(source_output_data.proplist, PA_PROP_MEDIA_NAME, "Virtual Source Stream of %s", pa_proplist_gets(u->source->proplist, PA_PROP_DEVICE_DESCRIPTION));
     pa_proplist_sets(source_output_data.proplist, PA_PROP_MEDIA_ROLE, "filter");
@@ -624,14 +598,12 @@ int pa__init(pa_module*m) {
     if (!u->source_output)
         goto fail;
 
-    u->source_output->parent.process_msg = source_output_process_msg_cb;
     u->source_output->push = source_output_push_cb;
     u->source_output->process_rewind = source_output_process_rewind_cb;
     u->source_output->kill = source_output_kill_cb;
     u->source_output->attach = source_output_attach_cb;
     u->source_output->detach = source_output_detach_cb;
     u->source_output->state_change = source_output_state_change_cb;
-    u->source_output->may_move_to = source_output_may_move_to_cb;
     u->source_output->moving = source_output_moving_cb;
     u->source_output->userdata = u;
 

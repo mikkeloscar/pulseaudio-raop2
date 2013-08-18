@@ -40,15 +40,14 @@
 PA_MODULE_AUTHOR("Joao Paulo Rechi Vita");
 PA_MODULE_DESCRIPTION("Detect available bluetooth audio devices and load bluetooth audio drivers");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_USAGE("async=<Asynchronous initialization?> "
-                "sco_sink=<name of sink> "
+PA_MODULE_USAGE("sco_sink=<name of sink> "
                 "sco_source=<name of source> ");
-PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_LOAD_ONCE(true);
 
 static const char* const valid_modargs[] = {
     "sco_sink",
     "sco_source",
-    "async",
+    "async", /* deprecated */
     NULL
 };
 
@@ -74,10 +73,7 @@ static pa_hook_result_t load_module_for_device(pa_bluetooth_discovery *y, const 
 
     mi = pa_hashmap_get(u->hashmap, d->path);
 
-    if (!d->dead && d->device_connected > 0 &&
-        (d->audio_state >= PA_BT_AUDIO_STATE_CONNECTED ||
-         d->audio_source_state >= PA_BT_AUDIO_STATE_CONNECTED ||
-         d->hfgw_state >= PA_BT_AUDIO_STATE_CONNECTED)) {
+    if (pa_bluetooth_device_any_audio_connected(d)) {
 
         if (!mi) {
             pa_module *m = NULL;
@@ -116,11 +112,9 @@ static pa_hook_result_t load_module_for_device(pa_bluetooth_discovery *y, const 
 
         if (mi) {
 
-            /* Hmm, disconnection? Then let's unload our module */
+            /* Hmm, disconnection? Then the module unloads itself */
 
-            pa_log_debug("Unloading module for %s", d->path);
-            pa_module_unload_request_by_index(u->core, mi->module, TRUE);
-
+            pa_log_debug("Unregistering module for %s", d->path);
             pa_hashmap_remove(u->hashmap, mi->path);
             pa_xfree(mi->path);
             pa_xfree(mi);
@@ -133,7 +127,6 @@ static pa_hook_result_t load_module_for_device(pa_bluetooth_discovery *y, const 
 int pa__init(pa_module* m) {
     struct userdata *u;
     pa_modargs *ma = NULL;
-    pa_bool_t async = FALSE;
 
     pa_assert(m);
 
@@ -142,10 +135,8 @@ int pa__init(pa_module* m) {
         goto fail;
     }
 
-    if (pa_modargs_get_value_boolean(ma, "async", &async) < 0) {
-        pa_log("Failed to parse async argument.");
-        goto fail;
-    }
+    if (pa_modargs_get_value(ma, "async", NULL))
+        pa_log_warn("The 'async' argument is deprecated and does nothing.");
 
     m->userdata = u = pa_xnew0(struct userdata, 1);
     u->module = m;
@@ -157,10 +148,8 @@ int pa__init(pa_module* m) {
     if (!(u->discovery = pa_bluetooth_discovery_get(u->core)))
         goto fail;
 
-    u->slot = pa_hook_connect(pa_bluetooth_discovery_hook(u->discovery), PA_HOOK_NORMAL, (pa_hook_cb_t) load_module_for_device, u);
-
-    if (!async)
-        pa_bluetooth_discovery_sync(u->discovery);
+    u->slot = pa_hook_connect(pa_bluetooth_discovery_hook(u->discovery, PA_BLUETOOTH_HOOK_DEVICE_CONNECTION_CHANGED),
+                              PA_HOOK_NORMAL, (pa_hook_cb_t) load_module_for_device, u);
 
     return 0;
 
@@ -195,7 +184,7 @@ void pa__done(pa_module* m) {
             pa_xfree(mi);
         }
 
-        pa_hashmap_free(u->hashmap, NULL, NULL);
+        pa_hashmap_free(u->hashmap, NULL);
     }
 
     if (u->modargs)

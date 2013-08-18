@@ -293,6 +293,7 @@ static DBusHandlerResult filter_handler(
 
 	rd_device *d;
 	DBusError error;
+	char *name_owner = NULL;
 
 	dbus_error_init(&error);
 
@@ -310,6 +311,21 @@ static DBusHandlerResult filter_handler(
 			goto invalid;
 
 		if (strcmp(name, d->service_name) == 0 && d->owning) {
+			/* Verify the actual owner of the name to avoid leaked NameLost
+			 * signals from previous reservations. The D-Bus daemon will send
+			 * all messages asynchronously in the correct order, but we could
+			 * potentially process them too late due to the pseudo-blocking
+			 * call mechanism used during both acquisition and release. This
+			 * can happen if we release the device and immediately after
+			 * reacquire it before NameLost is processed. */
+			if (!d->gave_up) {
+				const char *un;
+
+				if ((un = dbus_bus_get_unique_name(c)) && rd_dbus_get_name_owner(c, d->service_name, &name_owner, &error) == 0)
+					if (strcmp(name_owner, un) == 0)
+						goto invalid; /* Name still owned by us */
+			}
+
 			d->owning = 0;
 
 			if (!d->gave_up)  {
@@ -326,6 +342,7 @@ static DBusHandlerResult filter_handler(
 	}
 
 invalid:
+	free(name_owner);
 	dbus_error_free(&error);
 
 	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
@@ -605,4 +622,60 @@ void* rd_get_userdata(rd_device *d) {
 	assert(d->ref > 0);
 
 	return d->userdata;
+}
+
+int rd_dbus_get_name_owner(
+	DBusConnection *connection,
+	const char *name,
+	char **name_owner,
+	DBusError *error) {
+
+	DBusMessage *msg, *reply;
+	int r;
+
+	*name_owner = NULL;
+
+	if (!(msg = dbus_message_new_method_call(DBUS_SERVICE_DBUS, DBUS_PATH_DBUS, DBUS_INTERFACE_DBUS, "GetNameOwner"))) {
+		r = -ENOMEM;
+		goto fail;
+	}
+
+	if (!dbus_message_append_args(msg, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID)) {
+		r = -ENOMEM;
+		goto fail;
+	}
+
+	reply = dbus_connection_send_with_reply_and_block(connection, msg, DBUS_TIMEOUT_USE_DEFAULT, error);
+	dbus_message_unref(msg);
+	msg = NULL;
+
+	if (reply) {
+		if (!dbus_message_get_args(reply, error, DBUS_TYPE_STRING, name_owner, DBUS_TYPE_INVALID)) {
+			dbus_message_unref(reply);
+			r = -EIO;
+			goto fail;
+		}
+
+		*name_owner = strdup(*name_owner);
+		dbus_message_unref(reply);
+
+		if (!*name_owner) {
+			r = -ENOMEM;
+			goto fail;
+		}
+
+	} else if (dbus_error_has_name(error, "org.freedesktop.DBus.Error.NameHasNoOwner"))
+		dbus_error_free(error);
+	else {
+		r = -EIO;
+		goto fail;
+	}
+
+	return 0;
+
+fail:
+	if (msg)
+		dbus_message_unref(msg);
+
+	return r;
 }

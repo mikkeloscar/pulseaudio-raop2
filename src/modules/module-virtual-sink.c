@@ -48,7 +48,6 @@ PA_MODULE_USAGE(
         _("sink_name=<name for the sink> "
           "sink_properties=<properties for the sink> "
           "master=<name of sink to filter> "
-          "format=<sample format> "
           "rate=<sample rate> "
           "channels=<number of channels> "
           "channel_map=<channel map> "
@@ -77,7 +76,6 @@ static const char* const valid_modargs[] = {
     "sink_name",
     "sink_properties",
     "master",
-    "format",
     "rate",
     "channels",
     "channel_map",
@@ -420,16 +418,6 @@ static void sink_input_state_change_cb(pa_sink_input *i, pa_sink_input_state_t s
 }
 
 /* Called from main context */
-static pa_bool_t sink_input_may_move_to_cb(pa_sink_input *i, pa_sink *dest) {
-    struct userdata *u;
-
-    pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
-
-    return u->sink != dest;
-}
-
-/* Called from main context */
 static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
     struct userdata *u;
 
@@ -607,7 +595,6 @@ int pa__init(pa_module*m) {
     u->sink_input->attach = sink_input_attach_cb;
     u->sink_input->detach = sink_input_detach_cb;
     u->sink_input->state_change = sink_input_state_change_cb;
-    u->sink_input->may_move_to = sink_input_may_move_to_cb;
     u->sink_input->moving = sink_input_moving_cb;
     u->sink_input->volume_changed = use_volume_sharing ? NULL : sink_input_volume_changed_cb;
     u->sink_input->mute_changed = sink_input_mute_changed_cb;

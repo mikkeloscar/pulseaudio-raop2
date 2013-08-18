@@ -163,8 +163,18 @@ USA.
     </option>
 
     <option>
+      <p><opt>set-default-sink</opt> <arg>SINK</arg></p>
+      <optdesc><p>Make the specified sink (identified by its symbolic name) the default sink.</p></optdesc>
+    </option>
+
+    <option>
       <p><opt>set-sink-port</opt> <arg>SINK</arg> <arg>PORT</arg></p>
       <optdesc><p>Set the specified sink (identified by its symbolic name or numerical index) to the specified port (identified by its symbolic name).</p></optdesc>
+    </option>
+
+    <option>
+      <p><opt>set-default-source</opt> <arg>SOURCE</arg></p>
+      <optdesc><p>Make the specified source (identified by its symbolic name) the default source.</p></optdesc>
     </option>
 
     <option>
@@ -209,22 +219,22 @@ USA.
     </option>
 
     <option>
-      <p><opt>set-sink-mute</opt> <arg>SINK</arg> <arg>1|0</arg></p>
+      <p><opt>set-sink-mute</opt> <arg>SINK</arg> <arg>1|0|toggle</arg></p>
       <optdesc><p>Set the mute status of the specified sink (identified by its symbolic name or numerical index).</p></optdesc>
     </option>
 
     <option>
-      <p><opt>set-source-mute</opt> <arg>SOURCE</arg> <arg>1|0</arg></p>
+      <p><opt>set-source-mute</opt> <arg>SOURCE</arg> <arg>1|0|toggle</arg></p>
       <optdesc><p>Set the mute status of the specified source (identified by its symbolic name or numerical index).</p></optdesc>
     </option>
 
     <option>
-      <p><opt>set-sink-input-mute</opt> <arg>INPUT</arg> <arg>1|0</arg></p>
+      <p><opt>set-sink-input-mute</opt> <arg>INPUT</arg> <arg>1|0|toggle</arg></p>
       <optdesc><p>Set the mute status of the specified sink input (identified by its numerical index).</p></optdesc>
     </option>
 
     <option>
-      <p><opt>set-source-output-mute</opt> <arg>INPUT</arg> <arg>1|0</arg></p>
+      <p><opt>set-source-output-mute</opt> <arg>INPUT</arg> <arg>1|0|toggle</arg></p>
       <optdesc><p>Set the mute status of the specified source output (identified by its numerical index).</p></optdesc>
     </option>
 

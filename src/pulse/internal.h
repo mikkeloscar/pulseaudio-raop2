@@ -234,6 +234,8 @@ struct pa_operation {
     pa_operation_state_t state;
     void *userdata;
     pa_operation_cb_t callback;
+    void *state_userdata;
+    pa_operation_notify_cb_t state_callback;
 
     void *private; /* some operations might need this */
 };
@@ -302,8 +304,6 @@ pa_tagstruct *pa_tagstruct_command(pa_context *c, uint32_t command, uint32_t *ta
 void pa_ext_device_manager_command(pa_context *c, uint32_t tag, pa_tagstruct *t);
 void pa_ext_device_restore_command(pa_context *c, uint32_t tag, pa_tagstruct *t);
 void pa_ext_stream_restore_command(pa_context *c, uint32_t tag, pa_tagstruct *t);
-
-void pa_format_info_free2(pa_format_info *f, void *userdata);
 
 pa_bool_t pa_mainloop_is_our_api(pa_mainloop_api*m);
 

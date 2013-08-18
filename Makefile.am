@@ -26,12 +26,18 @@ EXTRA_DIST = \
 	doxygen/Makefile.am \
 	doxygen/Makefile.in \
 	doxygen/doxygen.conf.in \
+	PROTOCOL \
 	README \
 	todo \
-	vala/libpulse.deps \
-	vala/libpulse.vapi \
-	vala/libpulse-mainloop-glib.deps \
-	vala/libpulse-mainloop-glib.vapi
+	shell-completion/pulseaudio-zsh-completion.zsh \
+	.gitignore \
+	doxygen/.gitignore \
+	m4/.gitignore \
+	man/.gitignore \
+	po/.gitignore \
+	src/.gitignore \
+	src/daemon/.gitignore \
+	src/pulse/.gitignore
 
 SUBDIRS = src doxygen man po
 
@@ -39,7 +45,7 @@ MAINTAINERCLEANFILES =
 noinst_DATA =
 
 vapidir = $(datadir)/vala/vapi
-vapi_DATA = \
+dist_vapi_DATA = \
 		vala/libpulse.deps vala/libpulse.vapi \
 		vala/libpulse-mainloop-glib.deps vala/libpulse-mainloop-glib.vapi
 
@@ -53,6 +59,9 @@ endif
 
 cmakedir = $(libdir)/cmake/PulseAudio
 cmake_DATA = PulseAudioConfig.cmake PulseAudioConfigVersion.cmake
+
+bashcompletiondir=$(sysconfdir)/bash_completion.d
+dist_bashcompletion_DATA = shell-completion/pulseaudio-bash-completion.sh
 
 homepage: all dist doxygen
 	test -d $$HOME/homepage/private
@@ -74,13 +83,11 @@ fedora-snapshot: dist
 	cp $(distdir).tar.gz $$HOME/git.fedora/pulseaudio/$(distdir).tar.gz
 
 dist-hook:
-	if test -d .git ; then \
-		test -z $$USE_GIT || git pull ; \
-		test -f ${distdir}/ChangeLog && chmod u+w ${distdir}/ChangeLog ; \
-		( git-changelog.perl || echo "git-changelog.perl failed." ) > ${distdir}/ChangeLog 2>&1 ; \
-	fi
 	echo $(VERSION) > $(distdir)/.tarball-version
 	echo $(VERSION) > $(distdir)/.version
+
+check-daemon:
+	$(MAKE) -C src check-daemon
 
 .PHONY: homepage distcleancheck doxygen
 

@@ -923,19 +923,30 @@ static void handle_get_all(DBusConnection *conn, DBusMessage *msg, void *userdat
 static void handle_suspend(DBusConnection *conn, DBusMessage *msg, void *userdata) {
     pa_dbusiface_device *d = userdata;
     dbus_bool_t suspend = FALSE;
+    pa_client *client;
 
     pa_assert(conn);
     pa_assert(msg);
     pa_assert(d);
 
     pa_assert_se(dbus_message_get_args(msg, NULL, DBUS_TYPE_BOOLEAN, &suspend, DBUS_TYPE_INVALID));
+    pa_assert_se(client = pa_dbus_protocol_get_client(d->dbus_protocol, conn));
 
-    if ((d->type == PA_DEVICE_TYPE_SINK) && (pa_sink_suspend(d->sink, suspend, PA_SUSPEND_USER) < 0)) {
-        pa_dbus_send_error(conn, msg, DBUS_ERROR_FAILED, "Internal error in PulseAudio: pa_sink_suspend() failed.");
-        return;
-    } else if ((d->type == PA_DEVICE_TYPE_SOURCE) && (pa_source_suspend(d->source, suspend, PA_SUSPEND_USER) < 0)) {
-        pa_dbus_send_error(conn, msg, DBUS_ERROR_FAILED, "Internal error in PulseAudio: pa_source_suspend() failed.");
-        return;
+    if (d->type == PA_DEVICE_TYPE_SINK) {
+        pa_log_debug("%s sink %s requested by client %" PRIu32 ".", suspend ? "Suspending" : "Resuming", d->sink->name, client->index);
+
+        if (pa_sink_suspend(d->sink, suspend, PA_SUSPEND_USER) < 0) {
+            pa_dbus_send_error(conn, msg, DBUS_ERROR_FAILED, "Internal error in PulseAudio: pa_sink_suspend() failed.");
+            return;
+        }
+
+    } else {
+        pa_log_debug("%s source %s requested by client %" PRIu32 ".", suspend ? "Suspending" : "Resuming", d->source->name, client->index);
+
+        if (pa_source_suspend(d->source, suspend, PA_SUSPEND_USER) < 0) {
+            pa_dbus_send_error(conn, msg, DBUS_ERROR_FAILED, "Internal error in PulseAudio: pa_source_suspend() failed.");
+            return;
+        }
     }
 
     pa_dbus_send_empty_reply(conn, msg);
@@ -1255,14 +1266,6 @@ pa_dbusiface_device *pa_dbusiface_device_new_source(pa_dbusiface_core *core, pa_
     return d;
 }
 
-static void port_free_cb(void *p, void *userdata) {
-    pa_dbusiface_device_port *port = p;
-
-    pa_assert(port);
-
-    pa_dbusiface_device_port_free(port);
-}
-
 void pa_dbusiface_device_free(pa_dbusiface_device *d) {
     pa_assert(d);
 
@@ -1276,7 +1279,7 @@ void pa_dbusiface_device_free(pa_dbusiface_device *d) {
         pa_assert_se(pa_dbus_protocol_remove_interface(d->dbus_protocol, d->path, source_interface_info.name) >= 0);
         pa_source_unref(d->source);
     }
-    pa_hashmap_free(d->ports, port_free_cb, NULL);
+    pa_hashmap_free(d->ports, (pa_free_cb_t) pa_dbusiface_device_port_free);
     pa_proplist_free(d->proplist);
     pa_dbus_protocol_unref(d->dbus_protocol);
     pa_subscription_free(d->subscription);

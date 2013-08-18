@@ -32,7 +32,7 @@
 #include <pulse/util.h>
 #include <pulse/internal.h>
 
-#include <pulsecore/sample-util.h>
+#include <pulsecore/mix.h>
 #include <pulsecore/core-subscribe.h>
 #include <pulsecore/log.h>
 #include <pulsecore/play-memblockq.h>
@@ -47,6 +47,41 @@
 #define CONVERT_BUFFER_LENGTH (PA_PAGE_SIZE)
 
 PA_DEFINE_PUBLIC_CLASS(pa_sink_input, pa_msgobject);
+
+struct volume_factor_entry {
+    char *key;
+    pa_cvolume volume;
+};
+
+static struct volume_factor_entry *volume_factor_entry_new(const char *key, const pa_cvolume *volume) {
+    struct volume_factor_entry *entry;
+
+    pa_assert(key);
+    pa_assert(volume);
+
+    entry = pa_xnew(struct volume_factor_entry, 1);
+    entry->key = pa_xstrdup(key);
+
+    entry->volume = *volume;
+
+    return entry;
+}
+
+static void volume_factor_entry_free(struct volume_factor_entry *volume_entry) {
+    pa_assert(volume_entry);
+
+    pa_xfree(volume_entry->key);
+    pa_xfree(volume_entry);
+}
+
+static void volume_factor_from_hashmap(pa_cvolume *v, pa_hashmap *items, uint8_t channels) {
+    struct volume_factor_entry *entry;
+    void *state = NULL;
+
+    pa_cvolume_reset(v, channels);
+    PA_HASHMAP_FOREACH(entry, items, state)
+        pa_sw_cvolume_multiply(v, v, &entry->volume);
+}
 
 static void sink_input_free(pa_object *o);
 static void set_real_ratio(pa_sink_input *i, const pa_cvolume *v);
@@ -73,6 +108,9 @@ pa_sink_input_new_data* pa_sink_input_new_data_init(pa_sink_input_new_data *data
     data->resample_method = PA_RESAMPLER_INVALID;
     data->proplist = pa_proplist_new();
     data->volume_writable = TRUE;
+
+    data->volume_factor_items = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    data->volume_factor_sink_items = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
 
     return data;
 }
@@ -111,28 +149,26 @@ void pa_sink_input_new_data_set_volume(pa_sink_input_new_data *data, const pa_cv
         data->volume = *volume;
 }
 
-void pa_sink_input_new_data_apply_volume_factor(pa_sink_input_new_data *data, const pa_cvolume *volume_factor) {
+void pa_sink_input_new_data_add_volume_factor(pa_sink_input_new_data *data, const char *key, const pa_cvolume *volume_factor) {
+    struct volume_factor_entry *v;
+
     pa_assert(data);
+    pa_assert(key);
     pa_assert(volume_factor);
 
-    if (data->volume_factor_is_set)
-        pa_sw_cvolume_multiply(&data->volume_factor, &data->volume_factor, volume_factor);
-    else {
-        data->volume_factor_is_set = TRUE;
-        data->volume_factor = *volume_factor;
-    }
+    v = volume_factor_entry_new(key, volume_factor);
+    pa_assert_se(pa_hashmap_put(data->volume_factor_items, v->key, v) >= 0);
 }
 
-void pa_sink_input_new_data_apply_volume_factor_sink(pa_sink_input_new_data *data, const pa_cvolume *volume_factor) {
+void pa_sink_input_new_data_add_volume_factor_sink(pa_sink_input_new_data *data, const char *key, const pa_cvolume *volume_factor) {
+    struct volume_factor_entry *v;
+
     pa_assert(data);
+    pa_assert(key);
     pa_assert(volume_factor);
 
-    if (data->volume_factor_sink_is_set)
-        pa_sw_cvolume_multiply(&data->volume_factor_sink, &data->volume_factor_sink, volume_factor);
-    else {
-        data->volume_factor_sink_is_set = TRUE;
-        data->volume_factor_sink = *volume_factor;
-    }
+    v = volume_factor_entry_new(key, volume_factor);
+    pa_assert_se(pa_hashmap_put(data->volume_factor_sink_items, v->key, v) >= 0);
 }
 
 void pa_sink_input_new_data_set_muted(pa_sink_input_new_data *data, pa_bool_t mute) {
@@ -162,12 +198,12 @@ pa_bool_t pa_sink_input_new_data_set_sink(pa_sink_input_new_data *data, pa_sink 
             data->sink = s;
             data->save_sink = save;
             if (data->nego_formats)
-                pa_idxset_free(data->nego_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+                pa_idxset_free(data->nego_formats, (pa_free_cb_t) pa_format_info_free);
             data->nego_formats = formats;
         } else {
             /* Sink doesn't support any of the formats requested by the client */
             if (formats)
-                pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+                pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
             ret = FALSE;
         }
     }
@@ -180,7 +216,7 @@ pa_bool_t pa_sink_input_new_data_set_formats(pa_sink_input_new_data *data, pa_id
     pa_assert(formats);
 
     if (data->req_formats)
-        pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
 
     data->req_formats = formats;
 
@@ -196,13 +232,19 @@ void pa_sink_input_new_data_done(pa_sink_input_new_data *data) {
     pa_assert(data);
 
     if (data->req_formats)
-        pa_idxset_free(data->req_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->req_formats, (pa_free_cb_t) pa_format_info_free);
 
     if (data->nego_formats)
-        pa_idxset_free(data->nego_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->nego_formats, (pa_free_cb_t) pa_format_info_free);
 
     if (data->format)
         pa_format_info_free(data->format);
+
+    if (data->volume_factor_items)
+        pa_hashmap_free(data->volume_factor_items, (pa_free_cb_t) volume_factor_entry_free);
+
+    if (data->volume_factor_sink_items)
+        pa_hashmap_free(data->volume_factor_sink_items, (pa_free_cb_t) volume_factor_entry_free);
 
     pa_proplist_free(data->proplist);
 }
@@ -212,6 +254,7 @@ static void reset_callbacks(pa_sink_input *i) {
     pa_assert(i);
 
     i->pop = NULL;
+    i->process_underrun = NULL;
     i->process_rewind = NULL;
     i->update_max_rewind = NULL;
     i->update_max_request = NULL;
@@ -333,32 +376,34 @@ int pa_sink_input_new(
         data->save_volume = FALSE;
     }
 
+    if (!data->volume_writable)
+        data->save_volume = false;
+
     pa_return_val_if_fail(pa_cvolume_compatible(&data->volume, &data->sample_spec), -PA_ERR_INVALID);
-
-    if (!data->volume_factor_is_set)
-        pa_cvolume_reset(&data->volume_factor, data->sample_spec.channels);
-
-    pa_return_val_if_fail(pa_cvolume_compatible(&data->volume_factor, &data->sample_spec), -PA_ERR_INVALID);
-
-    if (!data->volume_factor_sink_is_set)
-        pa_cvolume_reset(&data->volume_factor_sink, data->sink->sample_spec.channels);
-
-    pa_return_val_if_fail(pa_cvolume_compatible(&data->volume_factor_sink, &data->sink->sample_spec), -PA_ERR_INVALID);
 
     if (!data->muted_is_set)
         data->muted = FALSE;
 
-    if (data->flags & PA_SINK_INPUT_FIX_FORMAT)
+    if (data->flags & PA_SINK_INPUT_FIX_FORMAT) {
+        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
         data->sample_spec.format = data->sink->sample_spec.format;
+        pa_format_info_set_sample_format(data->format, data->sample_spec.format);
+    }
 
-    if (data->flags & PA_SINK_INPUT_FIX_RATE)
+    if (data->flags & PA_SINK_INPUT_FIX_RATE) {
+        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
         data->sample_spec.rate = data->sink->sample_spec.rate;
+        pa_format_info_set_rate(data->format, data->sample_spec.rate);
+    }
 
     original_cm = data->channel_map;
 
     if (data->flags & PA_SINK_INPUT_FIX_CHANNELS) {
+        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
         data->sample_spec.channels = data->sink->sample_spec.channels;
         data->channel_map = data->sink->channel_map;
+        pa_format_info_set_channels(data->format, data->sample_spec.channels);
+        pa_format_info_set_channel_map(data->format, &data->channel_map);
     }
 
     pa_assert(pa_sample_spec_valid(&data->sample_spec));
@@ -371,10 +416,15 @@ int pa_sink_input_new(
 
         pa_log_info("Trying to change sample rate");
         if (pa_sink_update_rate(data->sink, data->sample_spec.rate, pa_sink_input_new_data_is_passthrough(data)) == TRUE)
-            pa_log_info("Rate changed to %u Hz",
-                        data->sink->sample_spec.rate);
-        else
-            pa_log_info("Resampling enabled to %u Hz", data->sink->sample_spec.rate);
+            pa_log_info("Rate changed to %u Hz", data->sink->sample_spec.rate);
+    }
+
+    if (pa_sink_input_new_data_is_passthrough(data) &&
+        !pa_sample_spec_equal(&data->sample_spec, &data->sink->sample_spec)) {
+        /* rate update failed, or other parts of sample spec didn't match */
+
+        pa_log_debug("Could not update sink sample spec to match passthrough stream");
+        return -PA_ERR_NOTSUPPORTED;
     }
 
     /* Due to the fixing of the sample spec the volume might not match anymore */
@@ -450,8 +500,14 @@ int pa_sink_input_new(
     } else
         i->volume = data->volume;
 
-    i->volume_factor = data->volume_factor;
-    i->volume_factor_sink = data->volume_factor_sink;
+    i->volume_factor_items = data->volume_factor_items;
+    data->volume_factor_items = NULL;
+    volume_factor_from_hashmap(&i->volume_factor, i->volume_factor_items, i->sample_spec.channels);
+
+    i->volume_factor_sink_items = data->volume_factor_sink_items;
+    data->volume_factor_sink_items = NULL;
+    volume_factor_from_hashmap(&i->volume_factor_sink, i->volume_factor_sink_items, i->sample_spec.channels);
+
     i->real_ratio = i->reference_ratio = data->volume;
     pa_cvolume_reset(&i->soft_volume, i->sample_spec.channels);
     pa_cvolume_reset(&i->real_ratio, i->sample_spec.channels);
@@ -489,6 +545,7 @@ int pa_sink_input_new(
     i->thread_info.rewrite_flush = FALSE;
     i->thread_info.dont_rewind_render = FALSE;
     i->thread_info.underrun_for = (uint64_t) -1;
+    i->thread_info.underrun_for_sink = 0;
     i->thread_info.playing_for = 0;
     i->thread_info.direct_outputs = pa_hashmap_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
@@ -695,10 +752,16 @@ static void sink_input_free(pa_object *o) {
         pa_proplist_free(i->proplist);
 
     if (i->direct_outputs)
-        pa_idxset_free(i->direct_outputs, NULL, NULL);
+        pa_idxset_free(i->direct_outputs, NULL);
 
     if (i->thread_info.direct_outputs)
-        pa_hashmap_free(i->thread_info.direct_outputs, NULL, NULL);
+        pa_hashmap_free(i->thread_info.direct_outputs, NULL);
+
+    if (i->volume_factor_items)
+        pa_hashmap_free(i->volume_factor_items, (pa_free_cb_t) volume_factor_entry_free);
+
+    if (i->volume_factor_sink_items)
+        pa_hashmap_free(i->volume_factor_sink_items, (pa_free_cb_t) volume_factor_entry_free);
 
     pa_xfree(i->driver);
     pa_xfree(i);
@@ -778,7 +841,7 @@ pa_usec_t pa_sink_input_get_latency(pa_sink_input *i, pa_usec_t *sink_latency) {
 }
 
 /* Called from thread context */
-void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, pa_memchunk *chunk, pa_cvolume *volume) {
+void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink bytes */, pa_memchunk *chunk, pa_cvolume *volume) {
     pa_bool_t do_volume_adj_here, need_volume_factor_sink;
     pa_bool_t volume_is_norm;
     size_t block_size_max_sink, block_size_max_sink_input;
@@ -847,8 +910,10 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
 
             pa_memblockq_seek(i->thread_info.render_memblockq, (int64_t) slength, PA_SEEK_RELATIVE, TRUE);
             i->thread_info.playing_for = 0;
-            if (i->thread_info.underrun_for != (uint64_t) -1)
+            if (i->thread_info.underrun_for != (uint64_t) -1) {
                 i->thread_info.underrun_for += ilength_full;
+                i->thread_info.underrun_for_sink += slength;
+            }
             break;
         }
 
@@ -858,6 +923,7 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
         pa_assert(tchunk.memblock);
 
         i->thread_info.underrun_for = 0;
+        i->thread_info.underrun_for_sink = 0;
         i->thread_info.playing_for += tchunk.length;
 
         while (tchunk.length > 0) {
@@ -969,6 +1035,23 @@ void pa_sink_input_drop(pa_sink_input *i, size_t nbytes /* in sink sample spec *
 
     pa_memblockq_drop(i->thread_info.render_memblockq, nbytes);
 }
+
+/* Called from thread context */
+bool pa_sink_input_process_underrun(pa_sink_input *i) {
+    pa_sink_input_assert_ref(i);
+    pa_sink_input_assert_io_context(i);
+
+    if (pa_memblockq_is_readable(i->thread_info.render_memblockq))
+        return false;
+
+    if (i->process_underrun && i->process_underrun(i)) {
+        /* All valid data has been played back, so we can empty this queue. */
+        pa_memblockq_silence(i->thread_info.render_memblockq);
+        return true;
+    }
+    return false;
+}
+
 
 /* Called from thread context */
 void pa_sink_input_process_rewind(pa_sink_input *i, size_t nbytes /* in sink sample spec */) {
@@ -1209,6 +1292,62 @@ void pa_sink_input_set_volume(pa_sink_input *i, const pa_cvolume *volume, pa_boo
     pa_subscription_post(i->core, PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE, i->index);
 }
 
+void pa_sink_input_add_volume_factor(pa_sink_input *i, const char *key, const pa_cvolume *volume_factor) {
+    struct volume_factor_entry *v;
+
+    pa_sink_input_assert_ref(i);
+    pa_assert_ctl_context();
+    pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
+    pa_assert(volume_factor);
+    pa_assert(key);
+    pa_assert(pa_cvolume_valid(volume_factor));
+    pa_assert(volume_factor->channels == 1 || pa_cvolume_compatible(volume_factor, &i->sample_spec));
+
+    v = volume_factor_entry_new(key, volume_factor);
+    if (!pa_cvolume_compatible(volume_factor, &i->sample_spec))
+        pa_cvolume_set(&v->volume, i->sample_spec.channels, volume_factor->values[0]);
+
+    pa_assert_se(pa_hashmap_put(i->volume_factor_items, v->key, v) >= 0);
+    if (pa_hashmap_size(i->volume_factor_items) == 1)
+        i->volume_factor = v->volume;
+    else
+        pa_sw_cvolume_multiply(&i->volume_factor, &i->volume_factor, &v->volume);
+
+    pa_sw_cvolume_multiply(&i->soft_volume, &i->real_ratio, &i->volume_factor);
+
+    /* Copy the new soft_volume to the thread_info struct */
+    pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i), PA_SINK_INPUT_MESSAGE_SET_SOFT_VOLUME, NULL, 0, NULL) == 0);
+}
+
+void pa_sink_input_remove_volume_factor(pa_sink_input *i, const char *key) {
+    struct volume_factor_entry *v;
+
+    pa_sink_input_assert_ref(i);
+    pa_assert(key);
+    pa_assert_ctl_context();
+    pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
+
+    pa_assert_se(v = pa_hashmap_remove(i->volume_factor_items, key));
+    volume_factor_entry_free(v);
+
+    switch (pa_hashmap_size(i->volume_factor_items)) {
+        case 0:
+            pa_cvolume_reset(&i->volume_factor, i->sample_spec.channels);
+            break;
+        case 1:
+            v = pa_hashmap_first(i->volume_factor_items);
+            i->volume_factor = v->volume;
+            break;
+        default:
+            volume_factor_from_hashmap(&i->volume_factor, i->volume_factor_items, i->volume_factor.channels);
+    }
+
+    pa_sw_cvolume_multiply(&i->soft_volume, &i->real_ratio, &i->volume_factor);
+
+    /* Copy the new soft_volume to the thread_info struct */
+    pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i), PA_SINK_INPUT_MESSAGE_SET_SOFT_VOLUME, NULL, 0, NULL) == 0);
+}
+
 /* Called from main context */
 static void set_real_ratio(pa_sink_input *i, const pa_cvolume *v) {
     pa_sink_input_assert_ref(i);
@@ -1437,6 +1576,8 @@ pa_bool_t pa_sink_input_may_move_to(pa_sink_input *i, pa_sink *dest) {
 /* Called from main context */
 int pa_sink_input_start_move(pa_sink_input *i) {
     pa_source_output *o, *p = NULL;
+    struct volume_factor_entry *v;
+    void *state = NULL;
     int r;
 
     pa_sink_input_assert_ref(i);
@@ -1474,7 +1615,12 @@ int pa_sink_input_start_move(pa_sink_input *i) {
     pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i->sink), PA_SINK_MESSAGE_START_MOVE, i, 0, NULL) == 0);
 
     pa_sink_update_status(i->sink);
+
+    PA_HASHMAP_FOREACH(v, i->volume_factor_sink_items, state)
+        pa_cvolume_remap(&v->volume, &i->sink->channel_map, &i->channel_map);
+
     pa_cvolume_remap(&i->volume_factor_sink, &i->sink->channel_map, &i->channel_map);
+
     i->sink = NULL;
 
     pa_sink_input_unref(i);
@@ -1634,6 +1780,9 @@ static void update_volume_due_to_moving(pa_sink_input *i, pa_sink *dest) {
 
 /* Called from main context */
 int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
+    struct volume_factor_entry *v;
+    void *state = NULL;
+
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
@@ -1662,11 +1811,7 @@ int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
 
         pa_log_info("Trying to change sample rate");
         if (pa_sink_update_rate(dest, i->sample_spec.rate, pa_sink_input_is_passthrough(i)) == TRUE)
-            pa_log_info("Rate changed to %u Hz",
-                        dest->sample_spec.rate);
-        else
-            pa_log_info("Resampling enabled to %u Hz",
-                        dest->sample_spec.rate);
+            pa_log_info("Rate changed to %u Hz", dest->sample_spec.rate);
     }
 
     if (i->moving)
@@ -1675,6 +1820,9 @@ int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
     i->sink = dest;
     i->save_sink = save;
     pa_idxset_put(dest->inputs, pa_sink_input_ref(i), NULL);
+
+    PA_HASHMAP_FOREACH(v, i->volume_factor_sink_items, state)
+        pa_cvolume_remap(&v->volume, &i->channel_map, &i->sink->channel_map);
 
     pa_cvolume_remap(&i->volume_factor_sink, &i->channel_map, &i->sink->channel_map);
 
@@ -1789,6 +1937,7 @@ void pa_sink_input_set_state_within_thread(pa_sink_input *i, pa_sink_input_state
         pa_log_debug("Requesting rewind due to uncorking");
 
         i->thread_info.underrun_for = (uint64_t) -1;
+        i->thread_info.underrun_for_sink = 0;
         i->thread_info.playing_for = 0;
 
         /* Set the uncorked state *before* requesting rewind */

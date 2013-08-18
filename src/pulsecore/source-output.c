@@ -32,7 +32,7 @@
 #include <pulse/util.h>
 #include <pulse/internal.h>
 
-#include <pulsecore/sample-util.h>
+#include <pulsecore/mix.h>
 #include <pulsecore/core-subscribe.h>
 #include <pulsecore/log.h>
 #include <pulsecore/namereg.h>
@@ -143,12 +143,12 @@ pa_bool_t pa_source_output_new_data_set_source(pa_source_output_new_data *data, 
             data->source = s;
             data->save_source = save;
             if (data->nego_formats)
-                pa_idxset_free(data->nego_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+                pa_idxset_free(data->nego_formats, (pa_free_cb_t) pa_format_info_free);
             data->nego_formats = formats;
         } else {
             /* Source doesn't support any of the formats requested by the client */
             if (formats)
-                pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+                pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
             ret = FALSE;
         }
     }
@@ -161,7 +161,7 @@ pa_bool_t pa_source_output_new_data_set_formats(pa_source_output_new_data *data,
     pa_assert(formats);
 
     if (data->req_formats)
-        pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
 
     data->req_formats = formats;
 
@@ -177,10 +177,10 @@ void pa_source_output_new_data_done(pa_source_output_new_data *data) {
     pa_assert(data);
 
     if (data->req_formats)
-        pa_idxset_free(data->req_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->req_formats, (pa_free_cb_t) pa_format_info_free);
 
     if (data->nego_formats)
-        pa_idxset_free(data->nego_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->nego_formats, (pa_free_cb_t) pa_format_info_free);
 
     if (data->format)
         pa_format_info_free(data->format);
@@ -309,6 +309,9 @@ int pa_source_output_new(
         data->save_volume = FALSE;
     }
 
+    if (!data->volume_writable)
+        data->save_volume = false;
+
     pa_return_val_if_fail(pa_cvolume_compatible(&data->volume, &data->sample_spec), -PA_ERR_INVALID);
 
     if (!data->volume_factor_is_set)
@@ -324,24 +327,30 @@ int pa_source_output_new(
     if (!data->muted_is_set)
         data->muted = FALSE;
 
-    if (data->flags & PA_SOURCE_OUTPUT_FIX_FORMAT)
+    if (data->flags & PA_SOURCE_OUTPUT_FIX_FORMAT) {
+        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
         data->sample_spec.format = data->source->sample_spec.format;
+        pa_format_info_set_sample_format(data->format, data->sample_spec.format);
+    }
 
-    if (data->flags & PA_SOURCE_OUTPUT_FIX_RATE)
+    if (data->flags & PA_SOURCE_OUTPUT_FIX_RATE) {
+        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
+        pa_format_info_set_rate(data->format, data->sample_spec.rate);
         data->sample_spec.rate = data->source->sample_spec.rate;
+    }
 
     original_cm = data->channel_map;
 
     if (data->flags & PA_SOURCE_OUTPUT_FIX_CHANNELS) {
+        pa_return_val_if_fail(pa_format_info_is_pcm(data->format), -PA_ERR_INVALID);
         data->sample_spec.channels = data->source->sample_spec.channels;
         data->channel_map = data->source->channel_map;
+        pa_format_info_set_channels(data->format, data->sample_spec.channels);
+        pa_format_info_set_channel_map(data->format, &data->channel_map);
     }
 
     pa_assert(pa_sample_spec_valid(&data->sample_spec));
     pa_assert(pa_channel_map_valid(&data->channel_map));
-
-    /* Due to the fixing of the sample spec the volume might not match anymore */
-    pa_cvolume_remap(&data->volume, &original_cm, &data->channel_map);
 
     if (!(data->flags & PA_SOURCE_OUTPUT_VARIABLE_RATE) &&
         !pa_sample_spec_equal(&data->sample_spec, &data->source->sample_spec)){
@@ -350,11 +359,19 @@ int pa_source_output_new(
 
         pa_log_info("Trying to change sample rate");
         if (pa_source_update_rate(data->source, data->sample_spec.rate, pa_source_output_new_data_is_passthrough(data)) == TRUE)
-            pa_log_info("Rate changed to %u Hz",
-                        data->source->sample_spec.rate);
-        else
-            pa_log_info("Resampling enabled to %u Hz", data->source->sample_spec.rate);
+            pa_log_info("Rate changed to %u Hz", data->source->sample_spec.rate);
     }
+
+    if (pa_source_output_new_data_is_passthrough(data) &&
+        !pa_sample_spec_equal(&data->sample_spec, &data->source->sample_spec)) {
+        /* rate update failed, or other parts of sample spec didn't match */
+
+        pa_log_debug("Could not update source sample spec to match passthrough stream");
+        return -PA_ERR_NOTSUPPORTED;
+    }
+
+    /* Due to the fixing of the sample spec the volume might not match anymore */
+    pa_cvolume_remap(&data->volume, &original_cm, &data->channel_map);
 
     if (data->resample_method == PA_RESAMPLER_INVALID)
         data->resample_method = core->resample_method;
@@ -1425,11 +1442,7 @@ int pa_source_output_finish_move(pa_source_output *o, pa_source *dest, pa_bool_t
 
         pa_log_info("Trying to change sample rate");
         if (pa_source_update_rate(dest, o->sample_spec.rate, pa_source_output_is_passthrough(o)) == TRUE)
-            pa_log_info("Rate changed to %u Hz",
-                        dest->sample_spec.rate);
-        else
-            pa_log_info("Resampling enabled to %u Hz",
-                        dest->sample_spec.rate);
+            pa_log_info("Rate changed to %u Hz", dest->sample_spec.rate);
     }
 
     if (o->moving)

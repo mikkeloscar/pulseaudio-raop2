@@ -264,10 +264,9 @@ void pa_database_close(pa_database *database) {
     pa_assert(db);
 
     pa_database_sync(database);
-    pa_database_clear(database);
     pa_xfree(db->filename);
     pa_xfree(db->tmp_filename);
-    pa_hashmap_free(db->map, NULL, NULL);
+    pa_hashmap_free(db->map, (pa_free_cb_t) free_entry);
     pa_xfree(db);
 }
 
@@ -340,12 +339,10 @@ int pa_database_unset(pa_database *database, const pa_datum *key) {
 
 int pa_database_clear(pa_database *database) {
     simple_data *db = (simple_data*)database;
-    entry *e;
 
     pa_assert(db);
 
-    while ((e = pa_hashmap_steal_first(db->map)))
-        free_entry(e);
+    pa_hashmap_remove_all(db->map, (pa_free_cb_t) free_entry);
 
     return 0;
 }
