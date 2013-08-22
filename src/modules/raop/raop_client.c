@@ -102,6 +102,7 @@ struct pa_raop_client {
     uint16_t server_timing_port;
 
     /* Encryption Related bits */
+    int encryption; /* Enable encryption? */
     AES_KEY aes;
     uint8_t aes_iv[AES_CHUNKSIZE]; /* Initialization vector for aes-cbc */
     uint8_t aes_nv[AES_CHUNKSIZE]; /* Next vector for aes-cbc */
@@ -317,9 +318,11 @@ static int encode_and_encrypt(pa_raop_client *c, uint8_t *block, size_t size, pa
 
     encoded->length = offset + written;
 
-    bp = b + offset;
-    /* Encrypt our data. */
-    aes_encrypt(c, bp, written);
+    if (c->encryption) {
+        bp = b + offset;
+        /* Encrypt our data. */
+        aes_encrypt(c, bp, written);
+    }
 
     /* We're done with the chunk. */
     pa_memblock_release(encoded->memblock);
@@ -1153,6 +1156,10 @@ int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume) {
     pa_xfree(param);
 
     return rv;
+}
+
+void pa_raop_client_set_encryption(pa_raop_client *c, int encryption) {
+    c->encryption = encryption;
 }
 
 void pa_raop_client_set_setup_callback(pa_raop_client *c, pa_raop_client_setup_cb_t callback, void *userdata) {

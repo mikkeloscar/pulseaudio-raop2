@@ -45,6 +45,7 @@ int pa_raop_client_encode_block(pa_raop_client *c, pa_memchunk *raw, pa_memchunk
 int pa_raop_client_send_audio_packet(pa_raop_client *c, pa_memchunk *block, ssize_t *written);
 
 int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume);
+void pa_raop_client_set_encryption(pa_raop_client *c, int encryption);
 
 typedef void (*pa_raop_client_setup_cb_t)(int control_fd, int timing_fd, void *userdata);
 void pa_raop_client_set_setup_callback(pa_raop_client *c, pa_raop_client_setup_cb_t callback, void *userdata);

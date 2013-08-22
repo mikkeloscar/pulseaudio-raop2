@@ -456,7 +456,7 @@ int pa__init(pa_module *m) {
     struct userdata *u = NULL;
     pa_sample_spec ss;
     pa_modargs *ma = NULL;
-    const char *server;
+    const char *server, *encryption;
     pa_sink_new_data data;
     char *t;
 
@@ -560,6 +560,9 @@ int pa__init(pa_module *m) {
         pa_log("Failed to connect to server.");
         goto fail;
     }
+
+    encryption = pa_modargs_get_value(ma, "encryption", NULL);
+    pa_raop_client_set_encryption(u->raop, !pa_streq(encryption, "none"));
 
     /* The number of frames per blocks is not negotiable... */
     pa_raop_client_get_blocks_size(u->raop, &u->block_size);
