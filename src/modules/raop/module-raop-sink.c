@@ -179,8 +179,8 @@ pa_log_debug("RAOP: IDLE");
                     break;
 
                 case PA_SINK_RUNNING:
-                    if (u->sink->thread_info.state == PA_SINK_SUSPENDED)
-                        pa_smoother_resume(u->smoother, pa_rtclock_now(), TRUE);
+                    pa_smoother_resume(u->smoother, pa_rtclock_now(), TRUE);
+
 pa_log_debug("RAOP: RUNNING");
                     if (!pa_raop_client_can_stream(u->raop)) {
                         /* Connecting will trigger a RECORD */
