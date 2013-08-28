@@ -192,7 +192,9 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                 case PA_SINK_UNLINKED:
                 case PA_SINK_INIT:
                 case PA_SINK_INVALID_STATE:
-                    ;
+                    pa_log_debug("RAOP: other message: %u",
+                                 (pa_sink_state_t) PA_PTR_TO_UINT(data));
+                    break;
             }
 
             break;
@@ -210,6 +212,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
 
         case SINK_MESSAGE_SETUP: {
             struct pollfd *pollfd;
+            pa_log_debug("RAOP: SINK_MESSAGE_SETUP");
 
             u->raop_rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, 2);
             pollfd = pa_rtpoll_item_get_pollfd(u->raop_rtpoll_item, NULL);
@@ -228,9 +231,11 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
         }
 
         case SINK_MESSAGE_RECORD: {
+            pa_log_debug("RAOP: SINK_MESSAGE_RECORD");
             pa_rtpoll_set_timer_relative(u->rtpoll, pa_bytes_to_usec(u->block_size, &u->sink->sample_spec));
 
             if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
+                pa_log_debug("going to flush");
                 /* Our stream has been suspended so we just flush it... */
                 pa_raop_client_flush(u->raop);
             }
@@ -239,6 +244,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
         }
 
         case SINK_MESSAGE_DISCONNECTED: {
+            pa_log_debug("RAOP: SINK_MESSAGE_DISCONNECTED");
             if (u->sink->thread_info.state == PA_SINK_SUSPENDED) {
                 pa_rtpoll_set_timer_disabled(u->rtpoll);
                 if (u->raop_rtpoll_item)
