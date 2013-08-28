@@ -158,7 +158,7 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
             switch ((pa_sink_state_t) PA_PTR_TO_UINT(data)) {
                 case PA_SINK_SUSPENDED:
                     pa_assert(PA_SINK_IS_OPENED(u->sink->thread_info.state));
-pa_log_debug("RAOP: SUSPENDED");
+                    pa_log_debug("RAOP: SUSPENDED");
                     pa_smoother_pause(u->smoother, pa_rtclock_now());
 
                     if (pa_raop_client_can_stream(u->raop)) {
@@ -169,7 +169,7 @@ pa_log_debug("RAOP: SUSPENDED");
                     break;
 
                 case PA_SINK_IDLE:
-pa_log_debug("RAOP: IDLE");
+                    pa_log_debug("RAOP: IDLE");
                     /* Issue a flush if we're comming from running state. */
                     if (u->sink->thread_info.state == PA_SINK_RUNNING) {
                         pa_rtpoll_set_timer_disabled(u->rtpoll);
@@ -181,7 +181,7 @@ pa_log_debug("RAOP: IDLE");
                 case PA_SINK_RUNNING:
                     pa_smoother_resume(u->smoother, pa_rtclock_now(), TRUE);
 
-pa_log_debug("RAOP: RUNNING");
+                    pa_log_debug("RAOP: RUNNING");
                     if (!pa_raop_client_can_stream(u->raop)) {
                         /* Connecting will trigger a RECORD */
                         pa_raop_client_connect(u->raop);
