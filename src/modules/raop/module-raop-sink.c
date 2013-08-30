@@ -468,6 +468,9 @@ static void udp_record_cb(void *userdata) {
 static void udp_disconnected_cb(void *userdata) {
     struct userdata *u = userdata;
 
+    /* This callback function is called from both STATE_TEARDOWN and
+       STATE_DISCONNECTED in raop_client.c */
+
     pa_assert(u);
 
     pa_log_debug("Connection closed, informing IO thread...");
