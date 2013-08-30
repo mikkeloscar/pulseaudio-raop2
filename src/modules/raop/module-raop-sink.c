@@ -353,8 +353,6 @@ static int udp_sink_process_msg(pa_msgobject *o, int code, void *data, int64_t o
             pollfd->events = POLLIN | POLLPRI;
             pollfd->revents = 0;
 
-            u->udp_control_fd = -1;
-            u->udp_timing_fd = -1;
             return 0;
         }
 
@@ -382,8 +380,12 @@ static int udp_sink_process_msg(pa_msgobject *o, int code, void *data, int64_t o
                 pa_module_unload_request(u->module, true);
             }
 
+            pa_close(u->udp_control_fd);
+            pa_close(u->udp_timing_fd);
+
             u->udp_control_fd = -1;
             u->udp_timing_fd = -1;
+
             return 0;
         }
     }
@@ -466,6 +468,11 @@ static void udp_record_cb(void *userdata) {
 
 static void udp_disconnected_cb(void *userdata) {
     struct userdata *u = userdata;
+
+    pa_assert(u);
+
+    /* This callback function is called from both STATE_TEARDOWN and
+       STATE_DISCONNECTED in raop_client.c */
 
     pa_assert(u);
 
