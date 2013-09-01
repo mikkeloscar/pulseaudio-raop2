@@ -1107,7 +1107,7 @@ int pa_raop_client_encode_block(pa_raop_client *c, pa_memchunk *raw, pa_memchunk
     pa_memchunk_reset(encoded);
     block = pa_memblock_acquire(raw->memblock);
     if (block != NULL && encoded != NULL) {
-        rv = encode_and_encrypt(c, block, raw->length, encoded, &read);
+        rv = encode_and_encrypt(c, block + raw->index, raw->length, encoded, &read);
         raw->index += read;
         raw->length -= read;
     }
