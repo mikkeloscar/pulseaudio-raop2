@@ -75,8 +75,6 @@ PA_MODULE_USAGE(
         "rate=<sample rate> "
         "channels=<number of channels>");
 
-#define DEFAULT_SINK_NAME "raop"
-
 struct userdata {
     pa_core *core;
     pa_module *module;
@@ -518,6 +516,7 @@ int pa__init(pa_module *m) {
     pa_modargs *ma = NULL;
     const char *server, *protocol;
     pa_sink_new_data data;
+    char *t = NULL;
 
     pa_assert(m);
 
@@ -579,6 +578,9 @@ int pa__init(pa_module *m) {
         goto fail;
     }
 
+    /* This may be overwriten if sink_name is specified in module arguments. */
+    t = pa_sprintf_malloc("raop_client.%s", server);
+
     protocol = pa_modargs_get_value(ma, "protocol", NULL);
     if (protocol == NULL || pa_streq(protocol, "TCP")) {
         /* Assume TCP by default */
@@ -596,7 +598,7 @@ int pa__init(pa_module *m) {
     pa_sink_new_data_init(&data);
     data.driver = __FILE__;
     data.module = m;
-    pa_sink_new_data_set_name(&data, pa_modargs_get_value(ma, "sink_name", DEFAULT_SINK_NAME));
+    pa_sink_new_data_set_name(&data, pa_modargs_get_value(ma, "sink_name", t));
     pa_sink_new_data_set_sample_spec(&data, &ss);
     pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, server);
     pa_proplist_sets(data.proplist, PA_PROP_DEVICE_INTENDED_ROLES, "music");
@@ -609,6 +611,7 @@ int pa__init(pa_module *m) {
     }
 
     u->sink = pa_sink_new(m->core, &data, PA_SINK_LATENCY|PA_SINK_NETWORK);
+    pa_xfree(t); t = NULL;
     pa_sink_new_data_done(&data);
 
     if (!u->sink) {
@@ -645,6 +648,8 @@ int pa__init(pa_module *m) {
     return 0;
 
 fail:
+    pa_xfree(t);
+
     if (ma)
         pa_modargs_free(ma);
 
