@@ -1306,7 +1306,7 @@ int pa_raop_client_encode_sample(pa_raop_client *c, pa_memchunk *raw, pa_memchun
     bit_writer(&bp,&bpos,&size,(bsize>>8)&0xff,8);
     bit_writer(&bp,&bpos,&size,(bsize)&0xff,8);
 
-    ibp = p = pa_memblock_acquire(raw->memblock);
+    ibp = p = pa_memblock_acquire(raw->memblock) + raw->index;
     maxibp = p + raw->length - 4;
     while (ibp <= maxibp) {
         /* Byte swap stereo data. */
