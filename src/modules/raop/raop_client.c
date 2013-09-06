@@ -954,14 +954,6 @@ static void udp_rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist
                 pa_close(c->udp_stream_fd);
                 c->udp_stream_fd = -1;
             }
-            if (c->udp_control_fd > 0) {
-                pa_close(c->udp_control_fd);
-                c->udp_control_fd = -1;
-            }
-            if (c->udp_timing_fd > 0) {
-                pa_close(c->udp_timing_fd);
-                c->udp_timing_fd = -1;
-            }
 
             pa_log_debug("RTSP control channel closed (teardown)");
 
@@ -981,6 +973,11 @@ static void udp_rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist
             */
             c->udp_disconnected_callback(c->udp_disconnected_userdata);
 
+            /* Control and timing fds are closed by udp_sink_process_msg,
+               after it disables poll */
+            c->udp_control_fd = -1;
+            c->udp_timing_fd = -1;
+
             break;
         }
 
@@ -993,14 +990,6 @@ static void udp_rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist
                 pa_close(c->udp_stream_fd);
                 c->udp_stream_fd = -1;
             }
-            if (c->udp_control_fd > 0) {
-                pa_close(c->udp_control_fd);
-                c->udp_control_fd = -1;
-            }
-            if (c->udp_timing_fd > 0) {
-                pa_close(c->udp_timing_fd);
-                c->udp_timing_fd = -1;
-            }
 
             pa_log_debug("RTSP control channel closed (disconnected)");
 
@@ -1010,6 +999,10 @@ static void udp_rtsp_cb(pa_rtsp_client *rtsp, pa_rtsp_state state, pa_headerlist
             c->sid = NULL;
 
             c->udp_disconnected_callback(c->udp_disconnected_userdata);
+            /* Control and timing fds are closed by udp_sink_process_msg,
+               after it disables poll */
+            c->udp_control_fd = -1;
+            c->udp_timing_fd = -1;
 
             break;
         }
