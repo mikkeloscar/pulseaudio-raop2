@@ -1325,26 +1325,10 @@ int pa_raop_client_set_volume(pa_raop_client *c, pa_volume_t volume) {
     pa_assert(c);
 
     db = pa_sw_volume_to_dB(volume);
-    if (c->protocol == RAOP_UDP) {
-        /* Try to calculate volume using the following formula,
-             db = 10 * log10(volume/MAXVOLUME/30),
-           assuming that pa_sw_volume_to_dB essentially does
-             pa_sw_volume_to_dB(v) = 20 * log10((v/MAXVOLUME)^3)
-                                    = 60 * log10(v/MAXVOLUME) */
-        db = pa_sw_volume_to_dB(volume/30.0)/6.0;
-
-        /* Volume db should satisfy
-            VOLUME_DEF <= db <= VOLUME_MAX
-          when it is not muted */
-        if (db < VOLUME_DEF && db > VOLUME_MIN)
-            db = VOLUME_DEF;
-    }
     if (db < VOLUME_MIN)
         db = VOLUME_MIN;
     else if (db > VOLUME_MAX)
         db = VOLUME_MAX;
-
-    pa_log_debug("volume=%u db=%.6f", volume, db);
 
     param = pa_sprintf_malloc("volume: %0.6f\r\n",  db);
 
