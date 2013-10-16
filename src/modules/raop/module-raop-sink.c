@@ -444,8 +444,8 @@ static void sink_set_volume_cb(pa_sink *s) {
     /* Create a pa_cvolume version of our single value. */
     pa_cvolume_set(&hw, s->sample_spec.channels, v);
 
-    /* Perform any software manipulation of the volume needed. */
-    pa_sw_cvolume_divide(&s->soft_volume, &s->real_volume, &hw);
+    /* Set the real volume based on given original volume. */
+    pa_cvolume_set(&s->real_volume, s->sample_spec.channels, v_orig);
 
     pa_log_debug("Requested volume: %s", pa_cvolume_snprint_verbose(t, sizeof(t), &s->real_volume, &s->channel_map, false));
     pa_log_debug("Got hardware volume: %s", pa_cvolume_snprint_verbose(t, sizeof(t), &hw, &s->channel_map, false));
