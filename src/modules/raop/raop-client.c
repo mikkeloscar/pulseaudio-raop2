@@ -1347,7 +1347,7 @@ static void rtsp_auth_cb(pa_rtsp_client *rtsp, pa_rtsp_state_t state, pa_rtsp_st
 
 pa_raop_client* pa_raop_client_new(pa_core *core, const char *host, pa_raop_protocol_t protocol,
                                    pa_raop_encryption_t encryption, pa_raop_codec_t codec) {
-    pa_raop_client *c = pa_xnew0(pa_raop_client, 1);
+    pa_raop_client *c;
     pa_parsed_address a;
     pa_sample_spec ss;
     size_t size = 2;
@@ -1355,11 +1355,12 @@ pa_raop_client* pa_raop_client_new(pa_core *core, const char *host, pa_raop_prot
     pa_assert(core);
     pa_assert(host);
 
-    c->port = 0;
-    c->host = NULL;
     if (pa_parse_address(host, &a) < 0 || a.type == PA_PARSED_ADDRESS_UNIX)
         return NULL;
 
+    c = pa_xnew0(pa_raop_client, 1);
+    c->port = 0;
+    c->host = NULL;
     c->core = core;
     c->host = pa_xstrdup(a.path_or_host);
     if (a.port > 0)
