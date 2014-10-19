@@ -1364,8 +1364,6 @@ pa_raop_client* pa_raop_client_new(pa_core *core, const char *host, pa_raop_prot
     }
 
     c = pa_xnew0(pa_raop_client, 1);
-    c->port = 0;
-    c->host = NULL;
     c->core = core;
     c->host = pa_xstrdup(a.path_or_host);
     if (a.port > 0)
