@@ -1353,11 +1353,6 @@ pa_raop_client* pa_raop_client_new(pa_core *core, const char *host, pa_raop_prot
     if (pa_parse_address(host, &a) < 0 || a.type == PA_PARSED_ADDRESS_UNIX)
         return NULL;
 
-    if (a.type == PA_PARSED_ADDRESS_TCP6) {
-        pa_log_warn("IPV6 is not supported yet: host: %s", host);
-        return NULL;
-    }
-
     c = pa_xnew0(pa_raop_client, 1);
     c->core = core;
     c->host = pa_xstrdup(a.path_or_host);
