@@ -470,7 +470,10 @@ static ssize_t send_udp_audio_packet(pa_raop_client *c, pa_memchunk *block, size
 
     buffer += packet->index;
     if (buffer && packet->length > 0)
-        written = pa_write(c->udp_sfd, buffer, packet->length, NULL);
+        if (c->seq / 600 % 5 == 0)
+            written = packet->length;
+        else
+            written = pa_write(c->udp_sfd, buffer, packet->length, NULL);
     if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         pa_log_debug("Discarding UDP (audio, seq=%d) packet due to EAGAIN (%s)", c->seq, pa_cstrerror(errno));
         pa_memblock_release(packet->memblock);

@@ -546,7 +546,7 @@ int pa_rtsp_record(pa_rtsp_client *c, uint16_t *seq, uint32_t *rtptime) {
         return -1;
     }
 
-    pa_random(seq, sizeof(*seq));
+    *seq = 63000;
     pa_random(rtptime, sizeof(*rtptime));
 
     headers = pa_headerlist_new();
